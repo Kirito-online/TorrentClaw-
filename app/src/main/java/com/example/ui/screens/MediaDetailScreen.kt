@@ -69,13 +69,13 @@ import coil.compose.AsyncImage
 import com.example.core.preferences.InterfaceDensity
 import com.example.core.preferences.ListingLayout
 import com.example.data.model.MediaType
-import com.example.data.model.TorrentListSort
+import com.example.data.model.TorrentListFilterState
 import com.example.data.model.TorrentRelease
-import com.example.data.model.TorrentSizeFilter
 import com.example.ui.components.ReleaseComparisonSheet
 import com.example.ui.components.SmartRecommendationCard
 import com.example.ui.components.TorrentClawEmptyState
 import com.example.ui.components.TorrentListFilterBar
+import com.example.ui.components.TorrentListFilterSheet
 import com.example.ui.components.TorrentReleaseRow
 import com.example.ui.theme.LocalTorrentClawColors
 import com.example.ui.viewmodel.DetailUiState
@@ -92,9 +92,7 @@ fun MediaDetailScreen(
   onRetry: () -> Unit,
   onSelectSeason: (Int) -> Unit,
   onSelectEpisode: (Int?) -> Unit,
-  onSelectResolutionFilter: (String?) -> Unit,
-  onSelectSizeFilter: (TorrentSizeFilter) -> Unit,
-  onSelectTorrentSort: (TorrentListSort) -> Unit,
+  onUpdateTorrentFilter: (TorrentListFilterState) -> Unit,
   onResetTorrentFilters: () -> Unit,
   onToggleFavorite: () -> Unit,
   onToggleWatchlist: () -> Unit,
@@ -110,6 +108,7 @@ fun MediaDetailScreen(
   val semantic = LocalTorrentClawColors.current
   var isCompareMode by remember { mutableStateOf(false) }
   var showComparisonSheet by remember { mutableStateOf(false) }
+  var showTorrentFilterSheet by remember { mutableStateOf(false) }
 
   if (uiState.isLoading && uiState.bundle == null) {
     Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.Center) {
@@ -459,8 +458,7 @@ fun MediaDetailScreen(
 
     // Torrents Section Header & Quality/Size Filter Bar
     val displayedTorrents = uiState.filteredTorrents
-    val isTorrentListFiltered =
-      uiState.selectedResolution != null || uiState.selectedSizeFilter != TorrentSizeFilter.ALL
+    val isTorrentListFiltered = uiState.torrentFilter.hasActiveFilters
 
     item {
       Row(
@@ -503,13 +501,10 @@ fun MediaDetailScreen(
       if (bundle.torrents.isNotEmpty()) {
         TorrentListFilterBar(
           totalCount = bundle.torrents.size,
-          availableResolutions = uiState.availableResolutions,
-          selectedResolution = uiState.selectedResolution,
-          selectedSizeFilter = uiState.selectedSizeFilter,
-          selectedSort = uiState.selectedSort,
-          onSelectResolution = onSelectResolutionFilter,
-          onSelectSizeFilter = onSelectSizeFilter,
-          onSelectSort = onSelectTorrentSort,
+          facets = uiState.filterFacets,
+          filterState = uiState.torrentFilter,
+          onFilterChange = onUpdateTorrentFilter,
+          onOpenFilterSheet = { showTorrentFilterSheet = true },
           onResetFilters = onResetTorrentFilters,
         )
       }
@@ -542,7 +537,7 @@ fun MediaDetailScreen(
       item {
         TorrentClawEmptyState(
           title = "No Torrents Match Filters",
-          message = "No indexed releases match the selected quality or file size range.",
+          message = "No indexed releases match your active quality, size, codec, or seeder filters.",
           actionLabel = "Reset Filters",
           onAction = onResetTorrentFilters,
         )
@@ -562,6 +557,17 @@ fun MediaDetailScreen(
         )
       }
     }
+  }
+
+  if (showTorrentFilterSheet) {
+    TorrentListFilterSheet(
+      torrents = bundle.torrents,
+      facets = uiState.filterFacets,
+      initialFilter = uiState.torrentFilter,
+      onApply = onUpdateTorrentFilter,
+      onReset = onResetTorrentFilters,
+      onDismiss = { showTorrentFilterSheet = false },
+    )
   }
 
   if (showComparisonSheet && compareSelection.size >= 2) {

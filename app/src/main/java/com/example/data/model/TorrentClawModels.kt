@@ -20,20 +20,77 @@ enum class SortOption(val apiValue: String, val label: String) {
   RELEVANCE("relevance", "Most Relevant"),
 }
 
-enum class TorrentSizeFilter(val label: String) {
-  ALL("Any Size"),
-  UNDER_2_GB("< 2 GB"),
-  FROM_2_TO_8_GB("2–8 GB"),
-  FROM_8_TO_20_GB("8–20 GB"),
-  OVER_20_GB("> 20 GB"),
+enum class TorrentSizeFilter(val label: String, val minGb: Float? = null, val maxGb: Float? = null) {
+  ALL("Any Size", null, null),
+  UNDER_2_GB("< 2 GB", null, 2f),
+  FROM_2_TO_8_GB("2–8 GB", 2f, 8f),
+  FROM_8_TO_20_GB("8–20 GB", 8f, 20f),
+  OVER_20_GB("> 20 GB", 20f, null),
 }
 
 enum class TorrentListSort(val label: String) {
   BEST_QUALITY("Best Quality"),
+  MOST_SEEDED("Most Seeded"),
   SMALLEST_SIZE("Smallest Size"),
   LARGEST_SIZE("Largest Size"),
-  MOST_SEEDED("Most Seeded"),
 }
+
+data class TorrentListFilterState(
+  val resolutions: Set<String> = emptySet(),
+  val sizePreset: TorrentSizeFilter = TorrentSizeFilter.ALL,
+  val customMinSizeGb: Float? = null,
+  val customMaxSizeGb: Float? = null,
+  val sources: Set<String> = emptySet(),
+  val codecs: Set<String> = emptySet(),
+  val hdrFormats: Set<String> = emptySet(),
+  val audioFormats: Set<String> = emptySet(),
+  val minSeeders: Int? = null,
+  val verifiedOnly: Boolean = false,
+  val debridCachedOnly: Boolean = false,
+  val keyword: String = "",
+  val sortBy: TorrentListSort = TorrentListSort.BEST_QUALITY,
+) {
+  val hasCustomSizeRange: Boolean
+    get() = customMinSizeGb != null || customMaxSizeGb != null
+
+  val hasActiveFilters: Boolean
+    get() =
+      resolutions.isNotEmpty() ||
+        sizePreset != TorrentSizeFilter.ALL ||
+        hasCustomSizeRange ||
+        sources.isNotEmpty() ||
+        codecs.isNotEmpty() ||
+        hdrFormats.isNotEmpty() ||
+        audioFormats.isNotEmpty() ||
+        (minSeeders != null && minSeeders > 0) ||
+        verifiedOnly ||
+        debridCachedOnly ||
+        keyword.isNotBlank()
+
+  val activeFilterCount: Int
+    get() =
+      resolutions.size +
+        (if (sizePreset != TorrentSizeFilter.ALL || hasCustomSizeRange) 1 else 0) +
+        sources.size +
+        codecs.size +
+        hdrFormats.size +
+        audioFormats.size +
+        (if (minSeeders != null && minSeeders > 0) 1 else 0) +
+        (if (verifiedOnly) 1 else 0) +
+        (if (debridCachedOnly) 1 else 0) +
+        (if (keyword.isNotBlank()) 1 else 0)
+}
+
+data class TorrentFilterFacets(
+  val resolutions: List<Pair<String, Int>> = emptyList(),
+  val sources: List<Pair<String, Int>> = emptyList(),
+  val codecs: List<Pair<String, Int>> = emptyList(),
+  val hdrFormats: List<Pair<String, Int>> = emptyList(),
+  val audioFormats: List<Pair<String, Int>> = emptyList(),
+  val maxSizeGb: Float = 50f,
+  val verifiedCount: Int = 0,
+  val debridCachedCount: Int = 0,
+)
 
 enum class TrueSpecStatus(val label: String) {
   VERIFIED("TrueSpec Verified"),
@@ -188,6 +245,10 @@ data class TorrentRelease(
   val episode: Int? = null,
   val debridCached: Boolean = false,
   val debridProvider: DebridProvider? = null,
+  val tmdbId: Int? = null,
+  val imdbId: String? = null,
+  val mediaYear: Int? = null,
+  val hasExplicitReleaseName: Boolean = true,
 ) {
   val resolvedMagnetUrl: String
     get() = magnetUrl?.takeIf { it.startsWith("magnet:") } ?: buildMagnetUri(infoHash, releaseName)
@@ -396,6 +457,46 @@ fun normalizeResolutionLabel(resolution: String): String {
   }
 }
 
+fun normalizeCodecGroup(raw: String?): String? {
+  val lower = raw?.trim()?.lowercase(Locale.US)?.takeIf { it.isNotBlank() } ?: return null
+  return when {
+    "x265" in lower || "h265" in lower || "h.265" in lower || "hevc" in lower -> "HEVC"
+    "x264" in lower || "h264" in lower || "h.264" in lower || "avc" in lower -> "H.264"
+    "av1" in lower -> "AV1"
+    "xvid" in lower || "divx" in lower -> "XviD"
+    else -> raw.trim()
+  }
+}
+
+fun normalizeSourceGroup(raw: String?): String? {
+  val lower = raw?.trim()?.lowercase(Locale.US)?.takeIf { it.isNotBlank() } ?: return null
+  return when {
+    "remux" in lower -> "REMUX"
+    "bluray" in lower || "blu-ray" in lower || "bdrip" in lower || "brrip" in lower -> "BluRay"
+    "web-dl" in lower || "webdl" in lower -> "WEB-DL"
+    "webrip" in lower -> "WEBRip"
+    "hdtv" in lower -> "HDTV"
+    "cam" in lower || "telesync" in lower || lower == "ts" -> "CAM/TS"
+    else -> raw.trim()
+  }
+}
+
+fun normalizeAudioGroup(raw: String?): String? {
+  val lower = raw?.trim()?.lowercase(Locale.US)?.takeIf { it.isNotBlank() } ?: return null
+  return when {
+    "atmos" in lower -> "Atmos"
+    "truehd" in lower -> "TrueHD"
+    "dts-hd" in lower || "dts:x" in lower -> "DTS-HD"
+    "dts" in lower -> "DTS"
+    "eac3" in lower || "ddp" in lower || "dd+" in lower || "e-ac-3" in lower -> "DD+"
+    "ac3" in lower || "dd5" in lower -> "AC3"
+    "flac" in lower -> "FLAC"
+    "opus" in lower -> "OPUS"
+    "aac" in lower -> "AAC"
+    else -> raw.trim()
+  }
+}
+
 fun extractAvailableResolutions(torrents: List<TorrentRelease>): List<Pair<String, Int>> {
   return torrents
     .groupingBy { normalizeResolutionLabel(it.resolution) }
@@ -405,32 +506,141 @@ fun extractAvailableResolutions(torrents: List<TorrentRelease>): List<Pair<Strin
     .map { it.key to it.value }
 }
 
+fun extractTorrentFilterFacets(torrents: List<TorrentRelease>): TorrentFilterFacets {
+  val gb = 1024.0 * 1024.0 * 1024.0
+  val maxBytes = torrents.maxOfOrNull { it.sizeBytes } ?: 0L
+  val rawMaxGb = (maxBytes / gb).toFloat()
+  val ceilingGb = maxOf(10f, kotlin.math.ceil(rawMaxGb.toDouble()).toFloat())
+
+  return TorrentFilterFacets(
+    resolutions = extractAvailableResolutions(torrents),
+    sources =
+      torrents
+        .mapNotNull { normalizeSourceGroup(it.sourceType) }
+        .groupingBy { it }
+        .eachCount()
+        .entries
+        .sortedByDescending { it.value }
+        .map { it.key to it.value },
+    codecs =
+      torrents
+        .mapNotNull { normalizeCodecGroup(it.videoCodec) }
+        .groupingBy { it }
+        .eachCount()
+        .entries
+        .sortedByDescending { it.value }
+        .map { it.key to it.value },
+    hdrFormats =
+      torrents
+        .mapNotNull { it.hdrFormat?.trim()?.takeIf { h -> h.isNotBlank() } }
+        .groupingBy { it }
+        .eachCount()
+        .entries
+        .sortedByDescending { it.value }
+        .map { it.key to it.value },
+    audioFormats =
+      torrents
+        .mapNotNull { normalizeAudioGroup(it.audioCodec) }
+        .groupingBy { it }
+        .eachCount()
+        .entries
+        .sortedByDescending { it.value }
+        .map { it.key to it.value },
+    maxSizeGb = ceilingGb,
+    verifiedCount = torrents.count { it.trueSpecStatus == TrueSpecStatus.VERIFIED },
+    debridCachedCount = torrents.count { it.debridCached },
+  )
+}
+
 fun filterAndSortTorrents(
   torrents: List<TorrentRelease>,
   selectedResolution: String?,
   sizeFilter: TorrentSizeFilter,
   sortBy: TorrentListSort,
 ): List<TorrentRelease> {
-  val gb = 1024L * 1024L * 1024L
+  return filterAndSortTorrents(
+    torrents = torrents,
+    filter =
+      TorrentListFilterState(
+        resolutions = selectedResolution?.let { setOf(it) }.orEmpty(),
+        sizePreset = sizeFilter,
+        sortBy = sortBy,
+      ),
+  )
+}
+
+fun filterAndSortTorrents(
+  torrents: List<TorrentRelease>,
+  filter: TorrentListFilterState,
+): List<TorrentRelease> {
+  val gb = 1024.0 * 1024.0 * 1024.0
+  val effectiveMinGb = filter.customMinSizeGb ?: filter.sizePreset.minGb
+  val effectiveMaxGb = filter.customMaxSizeGb ?: filter.sizePreset.maxGb
+  val kw = filter.keyword.trim().lowercase(Locale.US)
+
   val filtered =
     torrents.filter { t ->
       val resOk =
-        selectedResolution == null ||
-          normalizeResolutionLabel(t.resolution).equals(normalizeResolutionLabel(selectedResolution), ignoreCase = true)
+        filter.resolutions.isEmpty() ||
+          filter.resolutions.any {
+            normalizeResolutionLabel(t.resolution).equals(normalizeResolutionLabel(it), ignoreCase = true)
+          }
+
       val sizeOk =
-        when (sizeFilter) {
-          TorrentSizeFilter.ALL -> true
-          TorrentSizeFilter.UNDER_2_GB -> t.sizeBytes in 1L until (2L * gb)
-          TorrentSizeFilter.FROM_2_TO_8_GB -> t.sizeBytes in (2L * gb)..(8L * gb)
-          TorrentSizeFilter.FROM_8_TO_20_GB -> t.sizeBytes in ((8L * gb) + 1L)..(20L * gb)
-          TorrentSizeFilter.OVER_20_GB -> t.sizeBytes > (20L * gb)
+        if (effectiveMinGb == null && effectiveMaxGb == null) {
+          true
+        } else if (t.sizeBytes <= 0L) {
+          false
+        } else {
+          val minBytes = effectiveMinGb?.let { (it * gb).toLong() } ?: 1L
+          val maxBytes = effectiveMaxGb?.let { (it * gb).toLong() } ?: Long.MAX_VALUE
+          t.sizeBytes in minBytes..maxBytes
         }
-      resOk && sizeOk
+
+      val sourceOk =
+        filter.sources.isEmpty() ||
+          normalizeSourceGroup(t.sourceType)?.let { grp ->
+            filter.sources.any { it.equals(grp, ignoreCase = true) }
+          } == true
+
+      val codecOk =
+        filter.codecs.isEmpty() ||
+          normalizeCodecGroup(t.videoCodec)?.let { grp ->
+            filter.codecs.any { it.equals(grp, ignoreCase = true) }
+          } == true
+
+      val hdrOk =
+        filter.hdrFormats.isEmpty() ||
+          t.hdrFormat?.let { h ->
+            filter.hdrFormats.any { h.contains(it, ignoreCase = true) }
+          } == true
+
+      val audioOk =
+        filter.audioFormats.isEmpty() ||
+          normalizeAudioGroup(t.audioCodec)?.let { grp ->
+            filter.audioFormats.any { it.equals(grp, ignoreCase = true) }
+          } == true
+
+      val seedersOk = filter.minSeeders == null || t.seeders >= filter.minSeeders
+      val verifiedOk = !filter.verifiedOnly || t.trueSpecStatus == TrueSpecStatus.VERIFIED
+      val debridOk = !filter.debridCachedOnly || t.debridCached
+      val keywordOk =
+        kw.isEmpty() ||
+          t.releaseName.lowercase(Locale.US).contains(kw) ||
+          t.trackerSource.lowercase(Locale.US).contains(kw) ||
+          (t.videoCodec?.lowercase(Locale.US)?.contains(kw) == true) ||
+          (t.sourceType?.lowercase(Locale.US)?.contains(kw) == true) ||
+          (t.audioCodec?.lowercase(Locale.US)?.contains(kw) == true) ||
+          (t.hdrFormat?.lowercase(Locale.US)?.contains(kw) == true)
+
+      resOk && sizeOk && sourceOk && codecOk && hdrOk && audioOk && seedersOk && verifiedOk && debridOk && keywordOk
     }
 
-  return when (sortBy) {
+  return when (filter.sortBy) {
     TorrentListSort.BEST_QUALITY ->
       filtered.sortedWith(compareByDescending<TorrentRelease> { it.qualityScore }.thenByDescending { it.seeders })
+    TorrentListSort.MOST_SEEDED ->
+      filtered.sortedWith(compareByDescending<TorrentRelease> { it.seeders }.thenByDescending { it.qualityScore })
     TorrentListSort.SMALLEST_SIZE ->
       filtered.sortedWith(
         compareBy<TorrentRelease> { if (it.sizeBytes > 0L) 0 else 1 }
@@ -439,7 +649,169 @@ fun filterAndSortTorrents(
       )
     TorrentListSort.LARGEST_SIZE ->
       filtered.sortedWith(compareByDescending<TorrentRelease> { it.sizeBytes }.thenByDescending { it.qualityScore })
-    TorrentListSort.MOST_SEEDED ->
-      filtered.sortedWith(compareByDescending<TorrentRelease> { it.seeders }.thenByDescending { it.qualityScore })
   }
+}
+
+private fun normalizeTitleForMatch(raw: String): String {
+  return raw
+    .lowercase(Locale.US)
+    .replace(Regex("[^a-z0-9]+"), " ")
+    .trim()
+}
+
+private fun titleTokensForMatch(title: String): List<String> {
+  return normalizeTitleForMatch(title).split(' ').filter { it.isNotBlank() }
+}
+
+private fun titlesMatchStrictly(candidateTitle: String, target: MediaItem): Boolean {
+  val candNorm = normalizeTitleForMatch(candidateTitle)
+  if (candNorm.isBlank()) return false
+  val targets =
+    listOfNotNull(target.title, target.originalTitle)
+      .map(::normalizeTitleForMatch)
+      .filter { it.isNotBlank() }
+  return targets.any { it == candNorm }
+}
+
+private fun extractYearsFromText(text: String): List<Int> {
+  return Regex("""\b(19\d{2}|20\d{2})\b""")
+    .findAll(text)
+    .mapNotNull { it.groupValues[1].toIntOrNull() }
+    .filter { it != 2160 && it != 1080 }
+    .toList()
+}
+
+fun matchesTargetMediaItem(candidate: MediaItem, target: MediaItem): Boolean {
+  if (candidate.tmdbId != null && target.tmdbId != null) {
+    return candidate.tmdbId == target.tmdbId
+  }
+  if (!candidate.imdbId.isNullOrBlank() && !target.imdbId.isNullOrBlank()) {
+    return candidate.imdbId.equals(target.imdbId, ignoreCase = true)
+  }
+  if (candidate.id.isNotBlank() && target.id.isNotBlank() && candidate.id == target.id) {
+    return true
+  }
+  if (candidate.mediaType != target.mediaType) return false
+  if (!titlesMatchStrictly(candidate.title, target)) return false
+  if (candidate.year != null && target.year != null && kotlin.math.abs(candidate.year - target.year) > 1) {
+    return false
+  }
+  return true
+}
+
+fun matchesExplicitMediaIdentifiers(release: TorrentRelease, target: MediaItem): Boolean {
+  if (release.tmdbId != null && target.tmdbId != null) {
+    return release.tmdbId == target.tmdbId
+  }
+  if (!release.imdbId.isNullOrBlank() && !target.imdbId.isNullOrBlank()) {
+    return release.imdbId.equals(target.imdbId, ignoreCase = true)
+  }
+  if (!release.titleId.isNullOrBlank() && target.id.isNotBlank()) {
+    val matchesId =
+      release.titleId == target.id ||
+        (target.tmdbId != null && release.titleId == target.tmdbId.toString()) ||
+        (target.imdbId != null && release.titleId.equals(target.imdbId, ignoreCase = true))
+    if (!matchesId) return false
+  }
+  if (!release.mediaTitle.isNullOrBlank() && !titlesMatchStrictly(release.mediaTitle, target)) {
+    return false
+  }
+  if (release.mediaYear != null && target.year != null && kotlin.math.abs(release.mediaYear - target.year) > 1) {
+    return false
+  }
+  return true
+}
+
+fun matchesTargetMediaRelease(release: TorrentRelease, target: MediaItem): Boolean {
+  if (!matchesExplicitMediaIdentifiers(release, target)) return false
+
+  val idConfirmed =
+    (release.tmdbId != null && release.tmdbId == target.tmdbId) ||
+      (!release.imdbId.isNullOrBlank() && release.imdbId.equals(target.imdbId, ignoreCase = true)) ||
+      (!release.titleId.isNullOrBlank() && release.titleId == target.id)
+  if (idConfirmed) return true
+
+  if (!release.mediaTitle.isNullOrBlank() && titlesMatchStrictly(release.mediaTitle, target)) {
+    return true
+  }
+
+  if (!release.hasExplicitReleaseName) {
+    return false
+  }
+
+  val candidateTitles = listOfNotNull(target.title, target.originalTitle).filter { it.isNotBlank() }
+  val releaseNorm = normalizeTitleForMatch(release.releaseName)
+  val releaseWords = releaseNorm.split(' ').filter { it.isNotBlank() }
+  if (releaseWords.isEmpty()) return false
+
+  val titleMatched =
+    candidateTitles.any { titleCandidate ->
+      val titleNorm = normalizeTitleForMatch(titleCandidate)
+      val titleTokens = titleTokensForMatch(titleCandidate)
+      if (titleTokens.isEmpty()) {
+        false
+      } else {
+        // Require the full normalized title phrase at the start or as a contiguous token sequence,
+        // or all tokens when non-trivial so unrelated movies with one overlapping word don't leak in.
+        val phraseHit =
+          releaseNorm == titleNorm ||
+            releaseNorm.startsWith("$titleNorm ") ||
+            " $titleNorm " in " $releaseNorm "
+        val orderedTokensHit =
+          if (titleTokens.size >= 2) {
+            var idx = 0
+            for (word in releaseWords) {
+              if (word == titleTokens[idx]) {
+                idx++
+                if (idx == titleTokens.size) break
+              }
+            }
+            idx == titleTokens.size && releaseWords.indexOf(titleTokens.first()) <= 2
+          } else {
+            val single = titleTokens.first()
+            releaseWords.firstOrNull() == single || (single.length >= 5 && single in releaseWords)
+          }
+        phraseHit || orderedTokensHit
+      }
+    }
+
+  if (!titleMatched) return false
+
+  if (target.year != null) {
+    val yearsInName = extractYearsFromText(release.releaseName)
+    if (yearsInName.isNotEmpty() && yearsInName.none { kotlin.math.abs(it - target.year) <= 1 }) {
+      return false
+    }
+  }
+  return true
+}
+
+fun matchesSeasonAndEpisode(
+  release: TorrentRelease,
+  seasonFilter: Int?,
+  episodeFilter: Int?,
+): Boolean {
+  if (seasonFilter == null && episodeFilter == null) return true
+
+  val sxeRegex = Regex("""(?:^|[^a-z0-9])s(\d{1,2})(?:e(\d{1,3}))?(?=[^a-z0-9]|$)""", RegexOption.IGNORE_CASE)
+  val altRegex = Regex("""\b(\d{1,2})x(\d{1,3})\b""", RegexOption.IGNORE_CASE)
+  val sxeMatch = sxeRegex.find(release.releaseName)
+  val altMatch = altRegex.find(release.releaseName)
+
+  val parsedSeason = release.season ?: sxeMatch?.groupValues?.getOrNull(1)?.toIntOrNull() ?: altMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+  val parsedEpisode = release.episode ?: sxeMatch?.groupValues?.getOrNull(2)?.toIntOrNull() ?: altMatch?.groupValues?.getOrNull(2)?.toIntOrNull()
+
+  if (seasonFilter != null && parsedSeason != null && parsedSeason != seasonFilter) {
+    return false
+  }
+  if (episodeFilter != null) {
+    if (parsedEpisode != null) {
+      return parsedEpisode == episodeFilter
+    }
+    // Keep season packs if season matches, exclude only if another episode was explicitly tagged
+    if (seasonFilter != null && parsedSeason != null && parsedSeason != seasonFilter) {
+      return false
+    }
+  }
+  return true
 }

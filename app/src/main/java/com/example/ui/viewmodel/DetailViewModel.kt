@@ -6,11 +6,11 @@ import androidx.lifecycle.viewModelScope
 import com.example.AppContainer
 import com.example.data.model.MediaItem
 import com.example.data.model.SmartRecommendation
-import com.example.data.model.TorrentListSort
+import com.example.data.model.TorrentFilterFacets
+import com.example.data.model.TorrentListFilterState
 import com.example.data.model.TorrentRelease
-import com.example.data.model.TorrentSizeFilter
 import com.example.data.model.computeSmartRecommendation
-import com.example.data.model.extractAvailableResolutions
+import com.example.data.model.extractTorrentFilterFacets
 import com.example.data.model.filterAndSortTorrents
 import com.example.data.repository.MediaDetailBundle
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,10 +28,8 @@ data class DetailUiState(
   val selectedSeason: Int? = null,
   val selectedEpisode: Int? = null,
   val recommendation: SmartRecommendation? = null,
-  val selectedResolution: String? = null,
-  val selectedSizeFilter: TorrentSizeFilter = TorrentSizeFilter.ALL,
-  val selectedSort: TorrentListSort = TorrentListSort.BEST_QUALITY,
-  val availableResolutions: List<Pair<String, Int>> = emptyList(),
+  val torrentFilter: TorrentListFilterState = TorrentListFilterState(),
+  val filterFacets: TorrentFilterFacets = TorrentFilterFacets(),
   val filteredTorrents: List<TorrentRelease> = emptyList(),
   val isFavorite: Boolean = false,
   val isWatchlist: Boolean = false,
@@ -48,9 +46,7 @@ class DetailViewModel(
   private val _bundle = MutableStateFlow<MediaDetailBundle?>(null)
   private val _selectedSeason = MutableStateFlow<Int?>(null)
   private val _selectedEpisode = MutableStateFlow<Int?>(null)
-  private val _selectedResolution = MutableStateFlow<String?>(null)
-  private val _selectedSizeFilter = MutableStateFlow(TorrentSizeFilter.ALL)
-  private val _selectedSort = MutableStateFlow(TorrentListSort.BEST_QUALITY)
+  private val _torrentFilter = MutableStateFlow(TorrentListFilterState())
   private val _error = MutableStateFlow<String?>(null)
   private val _compareReleases = MutableStateFlow<List<TorrentRelease>>(emptyList())
   val compareReleases: StateFlow<List<TorrentRelease>> = _compareReleases.asStateFlow()
@@ -65,9 +61,7 @@ class DetailViewModel(
         container.libraryRepository.observeIsSaved(mediaId, "FAVORITE"),
         container.libraryRepository.observeIsSaved(mediaId, "WATCHLIST"),
         container.alertRepository.observeIsFollowed(mediaId),
-        _selectedResolution,
-        _selectedSizeFilter,
-        _selectedSort,
+        _torrentFilter,
       ) { values ->
         val loading = values[0] as Boolean
         val bundle = values[1] as MediaDetailBundle?
@@ -77,15 +71,11 @@ class DetailViewModel(
         val isFav = values[5] as Boolean
         val isWatch = values[6] as Boolean
         val isAlert = values[7] as Boolean
-        val resFilter = values[8] as String?
-        val sizeFilter = values[9] as TorrentSizeFilter
-        val sortOption = values[10] as TorrentListSort
+        val filterState = values[8] as TorrentListFilterState
 
         val allTorrents = bundle?.torrents.orEmpty()
-        val availableRes = extractAvailableResolutions(allTorrents)
-        val effectiveRes =
-          resFilter?.takeIf { target -> availableRes.any { it.first.equals(target, ignoreCase = true) } }
-        val filtered = filterAndSortTorrents(allTorrents, effectiveRes, sizeFilter, sortOption)
+        val facets = extractTorrentFilterFacets(allTorrents)
+        val filtered = filterAndSortTorrents(allTorrents, filterState)
         val rec = bundle?.let { computeSmartRecommendation(it.torrents, prefs) }
 
         DetailUiState(
@@ -94,10 +84,8 @@ class DetailViewModel(
           selectedSeason = season,
           selectedEpisode = episode,
           recommendation = rec,
-          selectedResolution = effectiveRes,
-          selectedSizeFilter = sizeFilter,
-          selectedSort = sortOption,
-          availableResolutions = availableRes,
+          torrentFilter = filterState,
+          filterFacets = facets,
           filteredTorrents = filtered,
           isFavorite = isFav,
           isWatchlist = isWatch,
@@ -140,22 +128,12 @@ class DetailViewModel(
     loadDetail(season = _selectedSeason.value, episode = episode)
   }
 
-  fun selectResolutionFilter(resolution: String?) {
-    _selectedResolution.value = resolution
-  }
-
-  fun selectSizeFilter(sizeFilter: TorrentSizeFilter) {
-    _selectedSizeFilter.value = sizeFilter
-  }
-
-  fun selectTorrentSort(sort: TorrentListSort) {
-    _selectedSort.value = sort
+  fun updateTorrentFilter(newFilter: TorrentListFilterState) {
+    _torrentFilter.value = newFilter
   }
 
   fun resetTorrentFilters() {
-    _selectedResolution.value = null
-    _selectedSizeFilter.value = TorrentSizeFilter.ALL
-    _selectedSort.value = TorrentListSort.BEST_QUALITY
+    _torrentFilter.value = TorrentListFilterState()
   }
 
   fun toggleFavorite() {

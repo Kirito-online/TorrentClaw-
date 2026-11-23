@@ -18,6 +18,10 @@ import com.example.data.model.TorrentRelease
 import com.example.data.model.TrueSpecReport
 import com.example.data.model.WatchProvider
 import com.example.data.model.deduplicateTorrents
+import com.example.data.model.matchesExplicitMediaIdentifiers
+import com.example.data.model.matchesSeasonAndEpisode
+import com.example.data.model.matchesTargetMediaItem
+import com.example.data.model.matchesTargetMediaRelease
 import com.example.data.model.parseImdbOrTmdbUrl
 import com.example.data.paging.SearchPagingSource
 import com.example.data.remote.DebridService
@@ -285,13 +289,35 @@ class MediaRepository(
       val raw = response.body()?.string().orEmpty()
       val parsed = TorrentClawJsonParser.parseSearchResponse(raw)
 
+      val urlMatchedMedia =
+        if (parsedUrl != null) {
+          parsed.mediaItems.filter { item ->
+            val tmdbOk = parsedUrl.tmdbId == null || item.tmdbId == null || item.tmdbId == parsedUrl.tmdbId
+            val imdbOk = parsedUrl.imdbId == null || item.imdbId == null || item.imdbId.equals(parsedUrl.imdbId, true)
+            tmdbOk && imdbOk
+          }
+        } else {
+          parsed.mediaItems
+        }
+
+      val urlMatchedTorrents =
+        if (parsedUrl != null) {
+          parsed.torrents.filter { rel ->
+            val tmdbOk = parsedUrl.tmdbId == null || rel.tmdbId == null || rel.tmdbId == parsedUrl.tmdbId
+            val imdbOk = parsedUrl.imdbId == null || rel.imdbId == null || rel.imdbId.equals(parsedUrl.imdbId, true)
+            tmdbOk && imdbOk
+          }
+        } else {
+          parsed.torrents
+        }
+
       // Apply multi-value client filters when multiple resolutions/codecs/HDR/size caps are active
       val filteredMedia =
-        parsed.mediaItems.map { item ->
+        urlMatchedMedia.map { item ->
           val deduped = filterAndEnrichTorrents(deduplicateTorrents(item.torrents), filter)
           item.copy(torrents = deduped)
         }
-      val filteredTorrents = filterAndEnrichTorrents(deduplicateTorrents(parsed.torrents), filter)
+      val filteredTorrents = filterAndEnrichTorrents(deduplicateTorrents(urlMatchedTorrents), filter)
 
       cacheMediaItems(filteredMedia)
       SearchParseResult(
@@ -342,7 +368,7 @@ class MediaRepository(
         coroutineScope {
           val detailDeferred = async {
             runCatching {
-              val r = api.getContentDetail(id)
+              val r = api.getContentDetail(id, season = seasonFilter, episode = episodeFilter)
               if (r.isSuccessful) {
                 TorrentClawJsonParser.parseMediaDetail(r.body()?.string().orEmpty(), id)
               } else null
@@ -356,10 +382,24 @@ class MediaRepository(
             }.getOrDefault(emptyList())
           }
 
+          val cached = getCachedMedia(id)
+          val rawDetail = detailDeferred.await()
           val baseMedia =
-            detailDeferred.await()
-              ?: getCachedMedia(id)
-              ?: throw IllegalStateException("Unable to load details for this title.")
+            when {
+              rawDetail != null && cached != null ->
+                rawDetail.copy(
+                  tmdbId = rawDetail.tmdbId ?: cached.tmdbId,
+                  imdbId = rawDetail.imdbId ?: cached.imdbId,
+                  year = rawDetail.year ?: cached.year,
+                  posterUrl = rawDetail.posterUrl ?: cached.posterUrl,
+                  backdropUrl = rawDetail.backdropUrl ?: cached.backdropUrl,
+                  overview = rawDetail.overview.ifBlank { cached.overview },
+                  seasons = rawDetail.seasons.ifEmpty { cached.seasons },
+                )
+              rawDetail != null -> rawDetail
+              cached != null -> cached
+              else -> throw IllegalStateException("Unable to load details for this title.")
+            }
 
           val watchProvidersDeferred = async {
             runCatching {
@@ -374,41 +414,68 @@ class MediaRepository(
             }.getOrDefault(emptyList())
           }
 
-          val torrentsDeferred = async {
-            runCatching {
-              val r =
-                api.search(
-                  query = if (baseMedia.tmdbId == null && baseMedia.imdbId == null) baseMedia.title else null,
-                  tmdbId = baseMedia.tmdbId,
-                  imdbId = baseMedia.imdbId,
-                  type = baseMedia.mediaType.apiValue,
-                  season = seasonFilter,
-                  episode = episodeFilter,
-                  sort = "quality_score",
-                  limit = 50,
-                )
-              if (r.isSuccessful) {
-                val parsed =
-                  TorrentClawJsonParser.parseSearchResponse(
-                    raw = r.body()?.string().orEmpty(),
-                    fallbackTitleId = baseMedia.id,
-                    fallbackMediaTitle = baseMedia.title,
-                    fallbackPoster = baseMedia.posterUrl,
-                  )
-                val combined =
-                  parsed.torrents + parsed.mediaItems.flatMap { it.torrents } + baseMedia.torrents
-                deduplicateTorrents(combined)
-              } else {
-                deduplicateTorrents(baseMedia.torrents)
-              }
-            }.getOrDefault(deduplicateTorrents(baseMedia.torrents))
-          }
+          val detailScopedTorrents =
+            baseMedia.torrents
+              .filter { matchesExplicitMediaIdentifiers(it, baseMedia) }
+              .filter { matchesSeasonAndEpisode(it, seasonFilter, episodeFilter) }
 
-          val enrichedTorrents = enrichWithDebridCache(torrentsDeferred.await())
+          val shouldQuerySearch =
+            detailScopedTorrents.isEmpty() ||
+              (baseMedia.torrentCount > detailScopedTorrents.size && seasonFilter == null && episodeFilter == null) ||
+              (seasonFilter != null && detailScopedTorrents.none { matchesSeasonAndEpisode(it, seasonFilter, episodeFilter) })
+
+          val searchTorrents =
+            if (shouldQuerySearch && baseMedia.title.isNotBlank() && baseMedia.title != "Untitled") {
+              runCatching {
+                val queryText =
+                  when {
+                    seasonFilter != null && episodeFilter != null ->
+                      String.format(Locale.US, "%s S%02dE%02d", baseMedia.title, seasonFilter, episodeFilter)
+                    seasonFilter != null ->
+                      String.format(Locale.US, "%s S%02d", baseMedia.title, seasonFilter)
+                    else -> baseMedia.title
+                  }
+                val r =
+                  api.search(
+                    query = queryText,
+                    tmdbId = baseMedia.tmdbId,
+                    imdbId = baseMedia.imdbId,
+                    type = baseMedia.mediaType.apiValue,
+                    season = seasonFilter,
+                    episode = episodeFilter,
+                    sort = "quality_score",
+                    limit = 50,
+                  )
+                if (r.isSuccessful) {
+                  val parsed = TorrentClawJsonParser.parseSearchResponse(r.body()?.string().orEmpty())
+                  val fromMatchingItems =
+                    parsed.mediaItems
+                      .filter { matchesTargetMediaItem(it, baseMedia) }
+                      .flatMap { it.torrents }
+                  val fromMatchingLooseTorrents =
+                    parsed.torrents.filter { matchesTargetMediaRelease(it, baseMedia) }
+                  (fromMatchingItems + fromMatchingLooseTorrents)
+                    .map { rel -> attachMediaMetadataIfMissing(rel, baseMedia) }
+                    .filter { matchesSeasonAndEpisode(it, seasonFilter, episodeFilter) }
+                } else {
+                  emptyList()
+                }
+              }.getOrDefault(emptyList())
+            } else {
+              emptyList()
+            }
+
+          val combinedTorrents =
+            deduplicateTorrents(
+              (detailScopedTorrents + searchTorrents)
+                .map { attachMediaMetadataIfMissing(it, baseMedia) }
+            )
+
+          val enrichedTorrents = enrichWithDebridCache(combinedTorrents)
           val finalMedia =
             baseMedia.copy(
               torrents = enrichedTorrents,
-              torrentCount = maxOf(baseMedia.torrentCount, enrichedTorrents.size),
+              torrentCount = enrichedTorrents.size,
             )
           cacheMediaItems(listOf(finalMedia))
 
@@ -421,6 +488,36 @@ class MediaRepository(
         }
       }
     }
+
+  private fun attachMediaMetadataIfMissing(rel: TorrentRelease, media: MediaItem): TorrentRelease {
+    val updatedReleaseName =
+      if (!rel.hasExplicitReleaseName) {
+        TorrentClawJsonParser.synthesizeReleaseTitle(
+          mediaTitle = media.title,
+          resolution = rel.resolution,
+          sourceType = rel.sourceType,
+          videoCodec = rel.videoCodec,
+          hdrFormat = rel.hdrFormat,
+          audioCodec = rel.audioCodec,
+          audioChannels = rel.audioChannels,
+          season = rel.season,
+          episode = rel.episode,
+          trackerSource = rel.trackerSource,
+          infoHash = rel.infoHash,
+        )
+      } else {
+        rel.releaseName
+      }
+    return rel.copy(
+      releaseName = updatedReleaseName,
+      titleId = rel.titleId ?: media.id,
+      mediaTitle = rel.mediaTitle ?: media.title,
+      posterUrl = rel.posterUrl ?: media.posterUrl,
+      tmdbId = rel.tmdbId ?: media.tmdbId,
+      imdbId = rel.imdbId ?: media.imdbId,
+      mediaYear = rel.mediaYear ?: media.year,
+    )
+  }
 
   private suspend fun enrichWithDebridCache(torrents: List<TorrentRelease>): List<TorrentRelease> {
     val activeDebrid = authRepository.debridAccounts.value.firstOrNull { it.isConnected } ?: return torrents

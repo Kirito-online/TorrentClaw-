@@ -186,8 +186,31 @@ object TorrentClawJsonParser {
   fun parseMediaDetail(raw: String, fallbackId: String = ""): MediaItem? {
     val root = parseRoot(raw) as? JsonObject ?: return null
     val target = (root["content"] as? JsonObject) ?: (root["data"] as? JsonObject) ?: (root["result"] as? JsonObject) ?: root
-    val parsed = parseMediaObject(target)
-    return if (parsed.id.isBlank() && fallbackId.isNotBlank()) parsed.copy(id = fallbackId) else parsed
+    var parsed = parseMediaObject(target)
+    if (parsed.id.isBlank() && fallbackId.isNotBlank()) {
+      parsed = parsed.copy(id = fallbackId)
+    }
+    if (target != root) {
+      val rootTorrents =
+        extractArray(root, "torrents", "releases", "streams", "sources").mapNotNull { el ->
+          (el as? JsonObject)?.let {
+            parseTorrentObject(
+              obj = it,
+              fallbackTitleId = parsed.id,
+              fallbackMediaTitle = parsed.title,
+              fallbackPoster = parsed.posterUrl,
+              fallbackTmdbId = parsed.tmdbId,
+              fallbackImdbId = parsed.imdbId,
+              fallbackMediaYear = parsed.year,
+            )
+          }
+        }
+      if (rootTorrents.isNotEmpty()) {
+        val merged = (parsed.torrents + rootTorrents).distinctBy { it.infoHash }
+        parsed = parsed.copy(torrents = merged, torrentCount = maxOf(parsed.torrentCount, merged.size))
+      }
+    }
+    return parsed
   }
 
   fun parseMediaObject(obj: JsonObject): MediaItem {
@@ -235,7 +258,17 @@ object TorrentClawJsonParser {
 
     val nestedTorrents =
       extractArray(obj, "torrents", "releases", "streams", "sources").mapNotNull { el ->
-        (el as? JsonObject)?.let { parseTorrentObject(it, rawId, title, poster) }
+        (el as? JsonObject)?.let {
+          parseTorrentObject(
+            obj = it,
+            fallbackTitleId = rawId,
+            fallbackMediaTitle = title,
+            fallbackPoster = poster,
+            fallbackTmdbId = tmdbId,
+            fallbackImdbId = imdbId,
+            fallbackMediaYear = year,
+          )
+        }
       }
 
     val seasonsList = mutableListOf<Int>()
@@ -314,6 +347,9 @@ object TorrentClawJsonParser {
     fallbackTitleId: String? = null,
     fallbackMediaTitle: String? = null,
     fallbackPoster: String? = null,
+    fallbackTmdbId: Int? = null,
+    fallbackImdbId: String? = null,
+    fallbackMediaYear: Int? = null,
   ): TorrentRelease? {
     val infoHash = obj.str("info_hash", "infoHash", "hash", "btih") ?: return null
     val magnetUrl = obj.str("magnet", "magnet_url", "magnetUrl", "magnet_uri")
@@ -325,6 +361,9 @@ object TorrentClawJsonParser {
     val resolvedMediaTitle =
       obj.str("media_title", "mediaTitle", "content_title", "contentTitle")
         ?: fallbackMediaTitle?.takeIf { it.isNotBlank() && it != "Untitled" }
+    val resolvedTmdbId = obj.intVal("tmdb_id", "tmdbId") ?: fallbackTmdbId
+    val resolvedImdbId = obj.str("imdb_id", "imdbId") ?: fallbackImdbId
+    val resolvedMediaYear = obj.intVal("media_year", "year", "release_year") ?: fallbackMediaYear
 
     val directCandidate = resolveRawReleaseName(obj, infoHash, magnetUrl, trueSpecReport?.primaryFileName)
     val inferenceBasis = directCandidate ?: ""
@@ -401,6 +440,10 @@ object TorrentClawJsonParser {
         ?: "https://torrentclaw.com/api/v1/torrent/${infoHash.lowercase(Locale.US)}",
       season = seasonNum,
       episode = episodeNum,
+      tmdbId = resolvedTmdbId,
+      imdbId = resolvedImdbId,
+      mediaYear = resolvedMediaYear,
+      hasExplicitReleaseName = directCandidate != null,
     )
   }
 

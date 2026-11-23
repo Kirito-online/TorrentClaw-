@@ -70,7 +70,12 @@ interface TorrentClawApi {
     @Query("limit") limit: Int = 20,
   ): Response<ResponseBody>
 
-  @GET("content/{id}") suspend fun getContentDetail(@Path("id") id: String): Response<ResponseBody>
+  @GET("content/{id}")
+  suspend fun getContentDetail(
+    @Path("id") id: String,
+    @Query("season") season: Int? = null,
+    @Query("episode") episode: Int? = null,
+  ): Response<ResponseBody>
 
   @GET("content/{id}/credits")
   suspend fun getContentCredits(@Path("id") id: String): Response<ResponseBody>

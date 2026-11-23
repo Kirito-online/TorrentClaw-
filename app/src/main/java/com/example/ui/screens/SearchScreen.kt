@@ -73,15 +73,15 @@ import com.example.data.model.MediaType
 import com.example.data.model.ParsedMediaLookup
 import com.example.data.model.SearchFilter
 import com.example.data.model.SortOption
-import com.example.data.model.TorrentListSort
+import com.example.data.model.TorrentListFilterState
 import com.example.data.model.TorrentRelease
-import com.example.data.model.TorrentSizeFilter
-import com.example.data.model.extractAvailableResolutions
+import com.example.data.model.extractTorrentFilterFacets
 import com.example.data.model.filterAndSortTorrents
 import com.example.ui.components.ReleaseComparisonSheet
 import com.example.ui.components.SearchFilterSheet
 import com.example.ui.components.TorrentClawEmptyState
 import com.example.ui.components.TorrentListFilterBar
+import com.example.ui.components.TorrentListFilterSheet
 import com.example.ui.components.TorrentReleaseRow
 import com.example.ui.theme.LocalTorrentClawColors
 
@@ -118,11 +118,10 @@ fun SearchScreen(
   val keyboard = LocalSoftwareKeyboardController.current
   val semantic = LocalTorrentClawColors.current
   var showFilters by remember { mutableStateOf(false) }
+  var showDirectTorrentFilters by remember { mutableStateOf(false) }
   var isCompareMode by remember { mutableStateOf(false) }
   var showComparisonSheet by remember { mutableStateOf(false) }
-  var torrentResFilter by remember { mutableStateOf<String?>(null) }
-  var torrentSizeFilter by remember { mutableStateOf(TorrentSizeFilter.ALL) }
-  var torrentSort by remember { mutableStateOf(TorrentListSort.BEST_QUALITY) }
+  var directTorrentFilter by remember { mutableStateOf(TorrentListFilterState()) }
 
   Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
     // Search Input Header
@@ -423,12 +422,12 @@ fun SearchScreen(
           }
         }
 
-        val availRes = remember(directTorrents) { extractAvailableResolutions(directTorrents) }
+        val directFacets = remember(directTorrents) { extractTorrentFilterFacets(directTorrents) }
         val filteredDirectTorrents =
-          remember(directTorrents, torrentResFilter, torrentSizeFilter, torrentSort) {
-            filterAndSortTorrents(directTorrents, torrentResFilter, torrentSizeFilter, torrentSort)
+          remember(directTorrents, directTorrentFilter) {
+            filterAndSortTorrents(directTorrents, directTorrentFilter)
           }
-        val isDirectFiltered = torrentResFilter != null || torrentSizeFilter != TorrentSizeFilter.ALL
+        val isDirectFiltered = directTorrentFilter.hasActiveFilters
 
         LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
           items(count = pagedMedia.itemCount, key = { idx -> pagedMedia[idx]?.id ?: "media_$idx" }) { index ->
@@ -451,18 +450,11 @@ fun SearchScreen(
               )
               TorrentListFilterBar(
                 totalCount = directTorrents.size,
-                availableResolutions = availRes,
-                selectedResolution = torrentResFilter,
-                selectedSizeFilter = torrentSizeFilter,
-                selectedSort = torrentSort,
-                onSelectResolution = { torrentResFilter = it },
-                onSelectSizeFilter = { torrentSizeFilter = it },
-                onSelectSort = { torrentSort = it },
-                onResetFilters = {
-                  torrentResFilter = null
-                  torrentSizeFilter = TorrentSizeFilter.ALL
-                  torrentSort = TorrentListSort.BEST_QUALITY
-                },
+                facets = directFacets,
+                filterState = directTorrentFilter,
+                onFilterChange = { directTorrentFilter = it },
+                onOpenFilterSheet = { showDirectTorrentFilters = true },
+                onResetFilters = { directTorrentFilter = TorrentListFilterState() },
               )
               HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
             }
@@ -470,13 +462,9 @@ fun SearchScreen(
               item {
                 TorrentClawEmptyState(
                   title = "No Torrents Match Filters",
-                  message = "Adjust quality or size filters to see matching releases.",
+                  message = "Adjust quality, size, codec, or seeder filters to see matching releases.",
                   actionLabel = "Reset Filters",
-                  onAction = {
-                    torrentResFilter = null
-                    torrentSizeFilter = TorrentSizeFilter.ALL
-                    torrentSort = TorrentListSort.BEST_QUALITY
-                  },
+                  onAction = { directTorrentFilter = TorrentListFilterState() },
                 )
               }
             } else {
@@ -530,6 +518,18 @@ fun SearchScreen(
       onApply = onApplyFilter,
       onReset = onResetFilters,
       onDismiss = { showFilters = false },
+    )
+  }
+
+  if (showDirectTorrentFilters && directTorrents.isNotEmpty()) {
+    val facets = remember(directTorrents) { extractTorrentFilterFacets(directTorrents) }
+    TorrentListFilterSheet(
+      torrents = directTorrents,
+      facets = facets,
+      initialFilter = directTorrentFilter,
+      onApply = { directTorrentFilter = it },
+      onReset = { directTorrentFilter = TorrentListFilterState() },
+      onDismiss = { showDirectTorrentFilters = false },
     )
   }
 
