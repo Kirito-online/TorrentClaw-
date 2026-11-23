@@ -388,7 +388,13 @@ class MediaRepository(
                   limit = 50,
                 )
               if (r.isSuccessful) {
-                val parsed = TorrentClawJsonParser.parseSearchResponse(r.body()?.string().orEmpty())
+                val parsed =
+                  TorrentClawJsonParser.parseSearchResponse(
+                    raw = r.body()?.string().orEmpty(),
+                    fallbackTitleId = baseMedia.id,
+                    fallbackMediaTitle = baseMedia.title,
+                    fallbackPoster = baseMedia.posterUrl,
+                  )
                 val combined =
                   parsed.torrents + parsed.mediaItems.flatMap { it.torrents } + baseMedia.torrents
                 deduplicateTorrents(combined)

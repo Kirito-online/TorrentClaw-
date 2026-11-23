@@ -11,6 +11,8 @@ import com.example.data.model.TorrentRelease
 import com.example.data.model.TrueSpecReport
 import com.example.data.model.TrueSpecStatus
 import com.example.data.model.WatchProvider
+import com.example.data.model.normalizeResolutionLabel
+import java.net.URLDecoder
 import java.util.Locale
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -120,7 +122,12 @@ object TorrentClawJsonParser {
     }
   }
 
-  fun parseSearchResponse(raw: String): SearchParseResult {
+  fun parseSearchResponse(
+    raw: String,
+    fallbackTitleId: String? = null,
+    fallbackMediaTitle: String? = null,
+    fallbackPoster: String? = null,
+  ): SearchParseResult {
     val root = parseRoot(raw)
     val itemsArray = extractArray(root, "results", "items", "content", "media", "data", "torrents")
     val mediaItems = mutableListOf<MediaItem>()
@@ -134,12 +141,17 @@ object TorrentClawJsonParser {
       val hasHashOnly = obj.str("info_hash", "infoHash", "hash") != null && !hasNestedTorrents
 
       if (hasHashOnly && !hasTitleId) {
-        parseTorrentObject(obj)?.let { looseTorrents.add(it) }
+        parseTorrentObject(obj, fallbackTitleId, fallbackMediaTitle, fallbackPoster)?.let { looseTorrents.add(it) }
       } else {
         val parsed = parseMediaObject(obj)
         mediaItems.add(parsed)
         if (hasHashOnly) {
-          parseTorrentObject(obj, parsed.id, parsed.title, parsed.posterUrl)?.let {
+          parseTorrentObject(
+            obj,
+            parsed.id.ifBlank { fallbackTitleId },
+            parsed.title.takeIf { it != "Untitled" } ?: fallbackMediaTitle,
+            parsed.posterUrl ?: fallbackPoster,
+          )?.let {
             looseTorrents.add(it)
           }
         }
@@ -150,7 +162,7 @@ object TorrentClawJsonParser {
     if (root is JsonObject && root["torrents"] is JsonArray) {
       for (el in root["torrents"]!!.jsonArray) {
         val obj = el as? JsonObject ?: continue
-        parseTorrentObject(obj)?.let { looseTorrents.add(it) }
+        parseTorrentObject(obj, fallbackTitleId, fallbackMediaTitle, fallbackPoster)?.let { looseTorrents.add(it) }
       }
     }
 
@@ -303,26 +315,54 @@ object TorrentClawJsonParser {
     fallbackMediaTitle: String? = null,
     fallbackPoster: String? = null,
   ): TorrentRelease? {
-    val infoHash = obj.str("info_hash", "infoHash", "hash") ?: return null
-    val releaseName = obj.str("release_name", "releaseName", "name", "title", "raw_title") ?: infoHash
-
-    // Extract filename-estimated metadata as fallback if API leaves individual fields blank
-    val parsedResolution =
-      obj.str("resolution", "quality") ?: inferResolution(releaseName)
-    val parsedSource =
-      obj.str("source_type", "sourceType", "rip_type", "source_quality") ?: inferSourceType(releaseName)
-    val parsedCodec =
-      obj.str("video_codec", "videoCodec", "codec") ?: inferVideoCodec(releaseName)
-    val parsedAudio =
-      obj.str("audio_codec", "audioCodec", "audio") ?: inferAudioCodec(releaseName)
-    val parsedChannels =
-      obj.str("audio_channels", "audioChannels", "channels") ?: inferAudioChannels(releaseName)
-    val parsedHdr =
-      obj.str("hdr", "hdr_format", "hdrFormat") ?: inferHdr(releaseName)
+    val infoHash = obj.str("info_hash", "infoHash", "hash", "btih") ?: return null
+    val magnetUrl = obj.str("magnet", "magnet_url", "magnetUrl", "magnet_uri")
 
     val trueSpecObj = obj["truespec"] as? JsonObject ?: obj["true_spec"] as? JsonObject
     val trueSpecStatus = parseTrueSpecStatus(obj, trueSpecObj)
     val trueSpecReport = parseTrueSpecReport(trueSpecObj, trueSpecStatus)
+
+    val resolvedMediaTitle =
+      obj.str("media_title", "mediaTitle", "content_title", "contentTitle")
+        ?: fallbackMediaTitle?.takeIf { it.isNotBlank() && it != "Untitled" }
+
+    val directCandidate = resolveRawReleaseName(obj, infoHash, magnetUrl, trueSpecReport?.primaryFileName)
+    val inferenceBasis = directCandidate ?: ""
+
+    // Extract filename-estimated metadata as fallback if API leaves individual fields blank
+    val parsedResolution =
+      obj.str("resolution", "quality") ?: inferResolution(inferenceBasis)
+    val parsedSource =
+      obj.str("source_type", "sourceType", "rip_type", "source_quality", "sourceQuality")
+        ?: inferSourceType(inferenceBasis)
+    val parsedCodec =
+      obj.str("video_codec", "videoCodec", "codec") ?: inferVideoCodec(inferenceBasis)
+    val parsedAudio =
+      obj.str("audio_codec", "audioCodec", "audio") ?: inferAudioCodec(inferenceBasis)
+    val rawChannels =
+      obj.str("audio_channels", "audioChannels", "channels") ?: inferAudioChannels(inferenceBasis)
+    val parsedChannels = normalizeAudioChannels(rawChannels)
+    val parsedHdr =
+      obj.str("hdr", "hdr_format", "hdrFormat") ?: inferHdr(inferenceBasis)
+    val trackerSource = obj.str("tracker", "source", "indexer", "provider") ?: "TorrentClaw"
+    val seasonNum = obj.intVal("season")
+    val episodeNum = obj.intVal("episode")
+
+    val releaseName =
+      directCandidate
+        ?: synthesizeReleaseTitle(
+          mediaTitle = resolvedMediaTitle,
+          resolution = parsedResolution,
+          sourceType = parsedSource,
+          videoCodec = parsedCodec,
+          hdrFormat = parsedHdr,
+          audioCodec = parsedAudio,
+          audioChannels = parsedChannels,
+          season = seasonNum,
+          episode = episodeNum,
+          trackerSource = trackerSource,
+          infoHash = infoHash,
+        )
 
     val languages =
       (obj["languages"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
@@ -338,7 +378,7 @@ object TorrentClawJsonParser {
       infoHash = infoHash.lowercase(Locale.US),
       releaseName = releaseName,
       titleId = obj.str("content_id", "contentId", "tmdb_id") ?: fallbackTitleId,
-      mediaTitle = obj.str("media_title", "mediaTitle") ?: fallbackMediaTitle,
+      mediaTitle = resolvedMediaTitle,
       posterUrl = resolvePosterUrl(obj.str("poster_url", "posterUrl", "poster_path")) ?: fallbackPoster,
       resolution = parsedResolution,
       sourceType = parsedSource,
@@ -348,20 +388,213 @@ object TorrentClawJsonParser {
       hdrFormat = parsedHdr,
       languages = languages,
       subtitles = subtitles,
-      sizeBytes = obj.longVal("size_bytes", "sizeBytes", "size") ?: 0L,
+      sizeBytes = obj.longVal("size_bytes", "sizeBytes", "size", "length") ?: 0L,
       seeders = obj.intVal("seeders", "seeds") ?: 0,
       leechers = obj.intVal("leechers", "peers") ?: 0,
-      trackerSource = obj.str("tracker", "source", "indexer", "provider") ?: "TorrentClaw",
+      trackerSource = trackerSource,
       indexedAt = obj.str("indexed_at", "added", "created_at", "upload_date"),
       qualityScore = obj.intVal("quality_score", "qualityScore", "score") ?: 0,
       trueSpecStatus = trueSpecStatus,
       trueSpecReport = trueSpecReport,
-      magnetUrl = obj.str("magnet", "magnet_url", "magnetUrl", "magnet_uri"),
+      magnetUrl = magnetUrl,
       torrentFileUrl = obj.str("torrent_url", "torrentUrl")
         ?: "https://torrentclaw.com/api/v1/torrent/${infoHash.lowercase(Locale.US)}",
-      season = obj.intVal("season"),
-      episode = obj.intVal("episode"),
+      season = seasonNum,
+      episode = episodeNum,
     )
+  }
+
+  private fun isHashOnlyString(value: String, infoHash: String): Boolean {
+    val trimmed = value.trim()
+    if (trimmed.isBlank()) return true
+    if (trimmed.equals("null", ignoreCase = true) || trimmed.equals("undefined", ignoreCase = true)) return true
+    if (trimmed.equals(infoHash, ignoreCase = true)) return true
+    if (trimmed.startsWith("urn:btih:", ignoreCase = true)) return true
+    return Regex("^[a-fA-F0-9]{32,64}$").matches(trimmed)
+  }
+
+  private fun cleanCandidateName(raw: String?, infoHash: String): String? {
+    if (raw == null) return null
+    val leaf = raw.trim().substringAfterLast('/').substringAfterLast('\\').trim()
+    return leaf.takeIf { it.isNotBlank() && !isHashOnlyString(it, infoHash) }
+  }
+
+  private fun extractMagnetDisplayName(magnetUrl: String?): String? {
+    if (magnetUrl.isNullOrBlank()) return null
+    val query = magnetUrl.substringAfter('?', "")
+    if (query.isBlank()) return null
+    val dnParam =
+      query.split('&').firstOrNull { it.startsWith("dn=", ignoreCase = true) }?.substringAfter('=')
+        ?: return null
+    return runCatching { URLDecoder.decode(dnParam, "UTF-8").trim() }
+      .getOrNull()
+      ?.takeIf { it.isNotBlank() }
+  }
+
+  private fun extractNestedFileName(obj: JsonObject, infoHash: String): String? {
+    val nestedObjects =
+      listOfNotNull(
+        obj["file"] as? JsonObject,
+        obj["parsed"] as? JsonObject,
+        obj["metadata"] as? JsonObject,
+        obj["attributes"] as? JsonObject,
+        obj["torrent"] as? JsonObject,
+      )
+    for (nested in nestedObjects) {
+      val hit =
+        cleanCandidateName(
+          nested.str(
+            "release_name",
+            "releaseName",
+            "raw_title",
+            "raw_name",
+            "filename",
+            "file_name",
+            "name",
+            "title",
+            "path",
+          ),
+          infoHash,
+        )
+      if (hit != null) return hit
+    }
+
+    val filesArr = obj["files"] as? JsonArray
+    if (filesArr != null) {
+      for (el in filesArr) {
+        val candidate =
+          when (el) {
+            is JsonPrimitive -> cleanCandidateName(el.contentOrNull, infoHash)
+            is JsonObject -> cleanCandidateName(el.str("name", "filename", "file_name", "path", "title"), infoHash)
+            else -> null
+          }
+        if (candidate != null) return candidate
+      }
+    }
+    return null
+  }
+
+  private fun resolveRawReleaseName(
+    obj: JsonObject,
+    infoHash: String,
+    magnetUrl: String?,
+    trueSpecPrimaryFile: String?,
+  ): String? {
+    val candidateKeys =
+      listOf(
+        "release_name",
+        "releaseName",
+        "raw_title",
+        "rawTitle",
+        "raw_name",
+        "rawName",
+        "torrent_name",
+        "torrentName",
+        "file_name",
+        "fileName",
+        "filename",
+        "display_name",
+        "displayName",
+        "release_title",
+        "releaseTitle",
+        "clean_title",
+        "cleanTitle",
+        "original_filename",
+        "original_name",
+        "name",
+        "title",
+        "release",
+        "label",
+        "dn",
+      )
+    for (key in candidateKeys) {
+      val found = cleanCandidateName(obj.str(key), infoHash)
+      if (found != null) return found
+    }
+    cleanCandidateName(trueSpecPrimaryFile, infoHash)?.let { return it }
+    extractNestedFileName(obj, infoHash)?.let { return it }
+    cleanCandidateName(extractMagnetDisplayName(magnetUrl), infoHash)?.let { return it }
+    return null
+  }
+
+  private fun normalizeAudioChannels(raw: String?): String? {
+    return when (raw?.trim()) {
+      null, "" -> null
+      "8" -> "7.1"
+      "6" -> "5.1"
+      "2" -> "2.0"
+      "1" -> "1.0"
+      else -> raw.trim()
+    }
+  }
+
+  private fun formatTokenForTitle(value: String?): String? {
+    val trimmed = value?.trim()?.takeIf { it.isNotBlank() } ?: return null
+    return when (trimmed.lowercase(Locale.US)) {
+      "bluray", "blu-ray" -> "BluRay"
+      "remux" -> "REMUX"
+      "web-dl", "webdl" -> "WEB-DL"
+      "webrip" -> "WEBRip"
+      "hdtv" -> "HDTV"
+      "hevc" -> "HEVC"
+      "av1" -> "AV1"
+      "h264", "h.264", "avc" -> "H.264"
+      "x265" -> "x265"
+      "x264" -> "x264"
+      "truehd" -> "TrueHD"
+      "atmos" -> "Atmos"
+      "dts" -> "DTS"
+      "dts-hd", "dts-hd ma" -> "DTS-HD MA"
+      "eac3", "ddp", "dd+" -> "DD+"
+      "ac3" -> "AC3"
+      "aac" -> "AAC"
+      "flac" -> "FLAC"
+      "opus" -> "OPUS"
+      else -> trimmed
+    }
+  }
+
+  fun synthesizeReleaseTitle(
+    mediaTitle: String?,
+    resolution: String,
+    sourceType: String?,
+    videoCodec: String?,
+    hdrFormat: String?,
+    audioCodec: String?,
+    audioChannels: String?,
+    season: Int? = null,
+    episode: Int? = null,
+    trackerSource: String = "TorrentClaw",
+    infoHash: String = "",
+  ): String {
+    val episodeTag =
+      when {
+        season != null && episode != null ->
+          String.format(Locale.US, "S%02dE%02d", season, episode)
+        season != null -> String.format(Locale.US, "S%02d", season)
+        else -> null
+      }
+    val resLabel = normalizeResolutionLabel(resolution).takeIf { it != "SD" }
+    val audioLabel =
+      listOfNotNull(formatTokenForTitle(audioCodec), audioChannels)
+        .joinToString(" ")
+        .takeIf { it.isNotBlank() }
+    val specParts =
+      listOfNotNull(
+        episodeTag,
+        resLabel,
+        formatTokenForTitle(sourceType),
+        formatTokenForTitle(videoCodec),
+        hdrFormat,
+        audioLabel,
+      )
+    val cleanTitle = mediaTitle?.takeIf { it.isNotBlank() && it != "Untitled" }
+    return when {
+      cleanTitle != null && specParts.isNotEmpty() -> "$cleanTitle • ${specParts.joinToString(" ")}"
+      specParts.isNotEmpty() -> "${specParts.joinToString(" ")} [$trackerSource]"
+      cleanTitle != null -> "$cleanTitle • ${infoHash.take(8).uppercase(Locale.US)}"
+      else -> "Release ${infoHash.take(8).uppercase(Locale.US)}"
+    }
   }
 
   private fun parseTrueSpecStatus(obj: JsonObject, tsObj: JsonObject?): TrueSpecStatus {

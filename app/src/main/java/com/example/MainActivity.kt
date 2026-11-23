@@ -453,6 +453,10 @@ private fun TorrentClawMainScaffold(
                 onRetry = { detailVm.loadDetail() },
                 onSelectSeason = detailVm::selectSeason,
                 onSelectEpisode = detailVm::selectEpisode,
+                onSelectResolutionFilter = detailVm::selectResolutionFilter,
+                onSelectSizeFilter = detailVm::selectSizeFilter,
+                onSelectTorrentSort = detailVm::selectTorrentSort,
+                onResetTorrentFilters = detailVm::resetTorrentFilters,
                 onToggleFavorite = detailVm::toggleFavorite,
                 onToggleWatchlist = detailVm::toggleWatchlist,
                 onToggleAlert = {

@@ -20,6 +20,21 @@ enum class SortOption(val apiValue: String, val label: String) {
   RELEVANCE("relevance", "Most Relevant"),
 }
 
+enum class TorrentSizeFilter(val label: String) {
+  ALL("Any Size"),
+  UNDER_2_GB("< 2 GB"),
+  FROM_2_TO_8_GB("2–8 GB"),
+  FROM_8_TO_20_GB("8–20 GB"),
+  OVER_20_GB("> 20 GB"),
+}
+
+enum class TorrentListSort(val label: String) {
+  BEST_QUALITY("Best Quality"),
+  SMALLEST_SIZE("Smallest Size"),
+  LARGEST_SIZE("Largest Size"),
+  MOST_SEEDED("Most Seeded"),
+}
+
 enum class TrueSpecStatus(val label: String) {
   VERIFIED("TrueSpec Verified"),
   PENDING("Scan Queued"),
@@ -357,3 +372,74 @@ data class ParsedMediaLookup(
   val tmdbId: Int? = null,
   val mediaType: MediaType? = null,
 )
+
+private fun resolutionOrder(resolution: String): Int {
+  val lower = resolution.lowercase(Locale.US)
+  return when {
+    "2160" in lower || "4k" in lower || "uhd" in lower -> 0
+    "1080" in lower -> 1
+    "720" in lower -> 2
+    "480" in lower -> 3
+    else -> 4
+  }
+}
+
+fun normalizeResolutionLabel(resolution: String): String {
+  val lower = resolution.lowercase(Locale.US).trim()
+  return when {
+    "2160" in lower || "4k" in lower || "uhd" in lower -> "2160p"
+    "1080" in lower -> "1080p"
+    "720" in lower -> "720p"
+    "480" in lower -> "480p"
+    lower.isBlank() || lower == "unknown" -> "SD"
+    else -> resolution.trim()
+  }
+}
+
+fun extractAvailableResolutions(torrents: List<TorrentRelease>): List<Pair<String, Int>> {
+  return torrents
+    .groupingBy { normalizeResolutionLabel(it.resolution) }
+    .eachCount()
+    .entries
+    .sortedWith(compareBy<Map.Entry<String, Int>> { resolutionOrder(it.key) }.thenByDescending { it.value })
+    .map { it.key to it.value }
+}
+
+fun filterAndSortTorrents(
+  torrents: List<TorrentRelease>,
+  selectedResolution: String?,
+  sizeFilter: TorrentSizeFilter,
+  sortBy: TorrentListSort,
+): List<TorrentRelease> {
+  val gb = 1024L * 1024L * 1024L
+  val filtered =
+    torrents.filter { t ->
+      val resOk =
+        selectedResolution == null ||
+          normalizeResolutionLabel(t.resolution).equals(normalizeResolutionLabel(selectedResolution), ignoreCase = true)
+      val sizeOk =
+        when (sizeFilter) {
+          TorrentSizeFilter.ALL -> true
+          TorrentSizeFilter.UNDER_2_GB -> t.sizeBytes in 1L until (2L * gb)
+          TorrentSizeFilter.FROM_2_TO_8_GB -> t.sizeBytes in (2L * gb)..(8L * gb)
+          TorrentSizeFilter.FROM_8_TO_20_GB -> t.sizeBytes in ((8L * gb) + 1L)..(20L * gb)
+          TorrentSizeFilter.OVER_20_GB -> t.sizeBytes > (20L * gb)
+        }
+      resOk && sizeOk
+    }
+
+  return when (sortBy) {
+    TorrentListSort.BEST_QUALITY ->
+      filtered.sortedWith(compareByDescending<TorrentRelease> { it.qualityScore }.thenByDescending { it.seeders })
+    TorrentListSort.SMALLEST_SIZE ->
+      filtered.sortedWith(
+        compareBy<TorrentRelease> { if (it.sizeBytes > 0L) 0 else 1 }
+          .thenBy { it.sizeBytes }
+          .thenByDescending { it.qualityScore }
+      )
+    TorrentListSort.LARGEST_SIZE ->
+      filtered.sortedWith(compareByDescending<TorrentRelease> { it.sizeBytes }.thenByDescending { it.qualityScore })
+    TorrentListSort.MOST_SEEDED ->
+      filtered.sortedWith(compareByDescending<TorrentRelease> { it.seeders }.thenByDescending { it.qualityScore })
+  }
+}

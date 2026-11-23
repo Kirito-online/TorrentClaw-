@@ -2,15 +2,20 @@ package com.example
 
 import com.example.core.preferences.UserPreferencesState
 import com.example.data.model.MediaType
+import com.example.data.model.TorrentListSort
 import com.example.data.model.TorrentRelease
+import com.example.data.model.TorrentSizeFilter
 import com.example.data.model.TrueSpecStatus
 import com.example.data.model.buildMagnetUri
 import com.example.data.model.computeSmartRecommendation
 import com.example.data.model.deduplicateTorrents
+import com.example.data.model.extractAvailableResolutions
+import com.example.data.model.filterAndSortTorrents
 import com.example.data.model.formatFileSize
 import com.example.data.model.parseImdbOrTmdbUrl
 import com.example.data.remote.TorrentClawJsonParser
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -82,6 +87,120 @@ class ExampleUnitTest {
     assertEquals(TrueSpecStatus.VERIFIED, rel.trueSpecStatus)
     assertEquals("HEVC", rel.videoCodec)
     assertEquals(95, rel.qualityScore)
+  }
+
+  @Test
+  fun `json parser avoids raw info hashes as torrent titles and resolves alternative fields`() {
+    val hash1 = "5f3b50774263a22272ba670943a07d132f91a06e"
+    val hash2 = "ac643ba9c4318b5a2bf107cd79df358e7bea2da1"
+    val hash3 = "baf93326d33672646e9b79afe877652b85d69b9f"
+    val payload =
+      """
+      {
+        "results": [
+          {
+            "info_hash": "$hash1",
+            "name": "$hash1",
+            "resolution": "2160p",
+            "source_type": "bluray",
+            "video_codec": "x265",
+            "audio_codec": "truehd",
+            "audio_channels": 8,
+            "size_bytes": 14506250000,
+            "seeders": 127,
+            "tracker": "torrents-csv"
+          },
+          {
+            "info_hash": "$hash2",
+            "raw_name": "The.Odyssey.2026.2160p.BluRay.HEVC.TrueHD.7.1-GRP",
+            "resolution": "2160p",
+            "quality_score": 89
+          },
+          {
+            "info_hash": "$hash3",
+            "magnet": "magnet:?xt=urn:btih:$hash3&dn=The.Odyssey.2026.1080p.BluRay.x264.DTS-SCENE",
+            "resolution": "1080p",
+            "quality_score": 87
+          }
+        ]
+      }
+      """
+        .trimIndent()
+
+    val parsed = TorrentClawJsonParser.parseSearchResponse(payload, fallbackMediaTitle = "The Odyssey")
+    assertEquals(3, parsed.torrents.size)
+
+    val t1 = parsed.torrents[0]
+    assertFalse("Release name must not show raw hash", t1.releaseName.equals(hash1, ignoreCase = true))
+    assertTrue(t1.releaseName.contains("The Odyssey"))
+    assertTrue(t1.releaseName.contains("2160p"))
+    assertTrue(t1.releaseName.contains("BluRay"))
+    assertEquals("7.1", t1.audioChannels)
+
+    val t2 = parsed.torrents[1]
+    assertEquals("The.Odyssey.2026.2160p.BluRay.HEVC.TrueHD.7.1-GRP", t2.releaseName)
+
+    val t3 = parsed.torrents[2]
+    assertEquals("The.Odyssey.2026.1080p.BluRay.x264.DTS-SCENE", t3.releaseName)
+  }
+
+  @Test
+  fun `filterAndSortTorrents filters by quality and size bucket and sorts accurately`() {
+    val gb = 1024L * 1024L * 1024L
+    val list =
+      listOf(
+        TorrentRelease(
+          infoHash = "1111111111111111111111111111111111111111",
+          releaseName = "Small 720p",
+          resolution = "720p",
+          sizeBytes = (1.4 * gb).toLong(),
+          qualityScore = 60,
+          seeders = 40,
+        ),
+        TorrentRelease(
+          infoHash = "2222222222222222222222222222222222222222",
+          releaseName = "Mid 1080p",
+          resolution = "1080p",
+          sizeBytes = 6L * gb,
+          qualityScore = 82,
+          seeders = 90,
+        ),
+        TorrentRelease(
+          infoHash = "3333333333333333333333333333333333333333",
+          releaseName = "Big 4K",
+          resolution = "2160p",
+          sizeBytes = 25L * gb,
+          qualityScore = 95,
+          seeders = 25,
+        ),
+        TorrentRelease(
+          infoHash = "4444444444444444444444444444444444444444",
+          releaseName = "Compact 4K",
+          resolution = "2160p",
+          sizeBytes = 12L * gb,
+          qualityScore = 91,
+          seeders = 150,
+        ),
+      )
+
+    val resCounts = extractAvailableResolutions(list)
+    assertEquals(listOf("2160p" to 2, "1080p" to 1, "720p" to 1), resCounts)
+
+    val only4kSmallestFirst =
+      filterAndSortTorrents(list, selectedResolution = "2160p", sizeFilter = TorrentSizeFilter.ALL, sortBy = TorrentListSort.SMALLEST_SIZE)
+    assertEquals(listOf("Compact 4K", "Big 4K"), only4kSmallestFirst.map { it.releaseName })
+
+    val over20Gb =
+      filterAndSortTorrents(list, selectedResolution = null, sizeFilter = TorrentSizeFilter.OVER_20_GB, sortBy = TorrentListSort.BEST_QUALITY)
+    assertEquals(listOf("Big 4K"), over20Gb.map { it.releaseName })
+
+    val under2Gb =
+      filterAndSortTorrents(list, selectedResolution = null, sizeFilter = TorrentSizeFilter.UNDER_2_GB, sortBy = TorrentListSort.BEST_QUALITY)
+    assertEquals(listOf("Small 720p"), under2Gb.map { it.releaseName })
+
+    val mostSeeded =
+      filterAndSortTorrents(list, selectedResolution = null, sizeFilter = TorrentSizeFilter.ALL, sortBy = TorrentListSort.MOST_SEEDED)
+    assertEquals("Compact 4K", mostSeeded.first().releaseName)
   }
 
   @Test

@@ -73,10 +73,15 @@ import com.example.data.model.MediaType
 import com.example.data.model.ParsedMediaLookup
 import com.example.data.model.SearchFilter
 import com.example.data.model.SortOption
+import com.example.data.model.TorrentListSort
 import com.example.data.model.TorrentRelease
+import com.example.data.model.TorrentSizeFilter
+import com.example.data.model.extractAvailableResolutions
+import com.example.data.model.filterAndSortTorrents
 import com.example.ui.components.ReleaseComparisonSheet
 import com.example.ui.components.SearchFilterSheet
 import com.example.ui.components.TorrentClawEmptyState
+import com.example.ui.components.TorrentListFilterBar
 import com.example.ui.components.TorrentReleaseRow
 import com.example.ui.theme.LocalTorrentClawColors
 
@@ -115,6 +120,9 @@ fun SearchScreen(
   var showFilters by remember { mutableStateOf(false) }
   var isCompareMode by remember { mutableStateOf(false) }
   var showComparisonSheet by remember { mutableStateOf(false) }
+  var torrentResFilter by remember { mutableStateOf<String?>(null) }
+  var torrentSizeFilter by remember { mutableStateOf(TorrentSizeFilter.ALL) }
+  var torrentSort by remember { mutableStateOf(TorrentListSort.BEST_QUALITY) }
 
   Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
     // Search Input Header
@@ -415,6 +423,13 @@ fun SearchScreen(
           }
         }
 
+        val availRes = remember(directTorrents) { extractAvailableResolutions(directTorrents) }
+        val filteredDirectTorrents =
+          remember(directTorrents, torrentResFilter, torrentSizeFilter, torrentSort) {
+            filterAndSortTorrents(directTorrents, torrentResFilter, torrentSizeFilter, torrentSort)
+          }
+        val isDirectFiltered = torrentResFilter != null || torrentSizeFilter != TorrentSizeFilter.ALL
+
         LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
           items(count = pagedMedia.itemCount, key = { idx -> pagedMedia[idx]?.id ?: "media_$idx" }) { index ->
             val media = pagedMedia[index]
@@ -425,25 +440,59 @@ fun SearchScreen(
           }
 
           if (directTorrents.isNotEmpty()) {
+
             item {
               Text(
-                text = "Matching Torrent Releases",
+                text =
+                  if (isDirectFiltered) "Matching Torrent Releases (${filteredDirectTorrents.size} of ${directTorrents.size})"
+                  else "Matching Torrent Releases (${directTorrents.size})",
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
               )
-            }
-            items(directTorrents, key = { it.infoHash }) { rel ->
-              TorrentReleaseRow(
-                release = rel,
-                layout = listingLayout,
-                density = density,
-                isCompareMode = isCompareMode,
-                isSelectedForCompare = compareSelection.any { it.infoHash == rel.infoHash },
-                onToggleCompare = { onToggleCompare(rel) },
-                onClick = { onInspectTorrent(rel) },
-                onQuickMagnet = { onQuickMagnet(rel) },
-                onQuickCopy = { onQuickCopy(rel) },
+              TorrentListFilterBar(
+                totalCount = directTorrents.size,
+                availableResolutions = availRes,
+                selectedResolution = torrentResFilter,
+                selectedSizeFilter = torrentSizeFilter,
+                selectedSort = torrentSort,
+                onSelectResolution = { torrentResFilter = it },
+                onSelectSizeFilter = { torrentSizeFilter = it },
+                onSelectSort = { torrentSort = it },
+                onResetFilters = {
+                  torrentResFilter = null
+                  torrentSizeFilter = TorrentSizeFilter.ALL
+                  torrentSort = TorrentListSort.BEST_QUALITY
+                },
               )
+              HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+            }
+            if (filteredDirectTorrents.isEmpty()) {
+              item {
+                TorrentClawEmptyState(
+                  title = "No Torrents Match Filters",
+                  message = "Adjust quality or size filters to see matching releases.",
+                  actionLabel = "Reset Filters",
+                  onAction = {
+                    torrentResFilter = null
+                    torrentSizeFilter = TorrentSizeFilter.ALL
+                    torrentSort = TorrentListSort.BEST_QUALITY
+                  },
+                )
+              }
+            } else {
+              items(filteredDirectTorrents, key = { it.infoHash }) { rel ->
+                TorrentReleaseRow(
+                  release = rel,
+                  layout = listingLayout,
+                  density = density,
+                  isCompareMode = isCompareMode,
+                  isSelectedForCompare = compareSelection.any { it.infoHash == rel.infoHash },
+                  onToggleCompare = { onToggleCompare(rel) },
+                  onClick = { onInspectTorrent(rel) },
+                  onQuickMagnet = { onQuickMagnet(rel) },
+                  onQuickCopy = { onQuickCopy(rel) },
+                )
+              }
             }
           }
 
