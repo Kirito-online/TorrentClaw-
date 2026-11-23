@@ -1,0 +1,6 @@
+{
+  "name": "TorrentClaw",
+  "description": "Native Android client for TorrentClaw media discovery, multi-source torrent search, TrueSpec verification, and debrid/magnet workflows.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
