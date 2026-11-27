@@ -1,6 +1,6 @@
 {
   "name": "TorrentClaw",
-  "description": "Native Android client for TorrentClaw media discovery, multi-source torrent search, TrueSpec verification, and debrid/magnet workflows.",
+  "description": "Native Jetpack Compose Android app mirroring torrentclaw.com via live HTML parsing with persistent session cookies, popup blocking, and native magnet handling.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

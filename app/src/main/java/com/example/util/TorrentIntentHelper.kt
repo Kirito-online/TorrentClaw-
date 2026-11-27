@@ -8,9 +8,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import androidx.core.content.FileProvider
-import com.example.data.model.MediaItem
-import com.example.data.model.TorrentRelease
-import com.example.data.model.formatFileSize
+import com.example.data.web.MagnetTarget
 import java.io.File
 
 data class InstalledTorrentClient(
@@ -26,7 +24,10 @@ object TorrentIntentHelper {
     val pm = context.packageManager
     val resolved =
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        pm.queryIntentActivities(probe, PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_DEFAULT_ONLY.toLong()))
+        pm.queryIntentActivities(
+          probe,
+          PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_DEFAULT_ONLY.toLong()),
+        )
       } else {
         @Suppress("DEPRECATION")
         pm.queryIntentActivities(probe, PackageManager.MATCH_DEFAULT_ONLY)
@@ -70,26 +71,8 @@ object TorrentIntentHelper {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
             if (!targetPackage.isNullOrBlank()) setPackage(targetPackage)
           }
-        context.startActivity(Intent.createChooser(intent, "Open .torrent file").apply {
-          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        })
-        true
-      }
-      .getOrDefault(false)
-  }
-
-  fun shareTorrentFile(context: Context, file: File, releaseName: String): Boolean {
-    return runCatching {
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-        val intent =
-          Intent(Intent.ACTION_SEND).apply {
-            type = "application/x-bittorrent"
-            putExtra(Intent.EXTRA_STREAM, uri)
-            putExtra(Intent.EXTRA_SUBJECT, releaseName)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-          }
         context.startActivity(
-          Intent.createChooser(intent, "Share .torrent").apply {
+          Intent.createChooser(intent, "Open .torrent file").apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
           }
         )
@@ -117,40 +100,21 @@ object TorrentIntentHelper {
     )
   }
 
-  fun shareMediaItem(context: Context, item: MediaItem) {
-    val yearSuffix = item.year?.let { " ($it)" }.orEmpty()
-    val url =
-      when {
-        item.imdbId != null -> "https://www.imdb.com/title/${item.imdbId}/"
-        item.tmdbId != null ->
-          "https://www.themoviedb.org/${if (item.mediaType.name == "SHOW") "tv" else "movie"}/${item.tmdbId}"
-        else -> "https://torrentclaw.com/?q=${Uri.encode(item.title)}"
-      }
-    val text = buildString {
-      append("${item.title}$yearSuffix\n")
-      item.rating?.let { append("Rating: ${"%.1f".format(it)}/10 • ") }
-      append("${item.torrentCount} releases on TorrentClaw\n")
-      append(url)
-    }
-    shareText(context, item.title, text)
+  fun sharePageUrl(context: Context, title: String, url: String) {
+    shareText(context, title.ifBlank { "TorrentClaw" }, url)
   }
 
-  fun shareTorrentRelease(context: Context, release: TorrentRelease) {
-    val text = buildString {
-      append("${release.releaseName}\n")
-      append("${release.resolution} • ${formatFileSize(release.sizeBytes)} • Score ${release.qualityScore}/100\n")
-      append("Seeders: ${release.seeders} • Source: ${release.trackerSource}\n")
-      append("Hash: ${release.infoHash}\n\n")
-      append(release.resolvedMagnetUrl)
-    }
-    shareText(context, release.releaseName, text)
-  }
-
-  fun openBrowserUrl(context: Context, url: String) {
-    val intent =
-      Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+  fun shareMagnetTarget(context: Context, target: MagnetTarget) {
+    val body = buildString {
+      append(target.title)
+      val meta = listOfNotNull(target.resolution, target.size, target.seeders?.let { "$it seeders" })
+      if (meta.isNotEmpty()) {
+        append("\n")
+        append(meta.joinToString(" • "))
       }
-    runCatching { context.startActivity(intent) }
+      append("\n\n")
+      append(target.primaryCopyUrl)
+    }
+    shareText(context, target.title, body)
   }
 }

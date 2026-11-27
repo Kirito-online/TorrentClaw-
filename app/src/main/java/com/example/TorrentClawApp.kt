@@ -8,40 +8,20 @@ import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import com.example.core.preferences.AppPreferences
 import com.example.core.security.KeystoreCredentialVault
-import com.example.data.local.TorrentClawDatabase
-import com.example.data.remote.DebridService
-import com.example.data.remote.NetworkModule
-import com.example.data.repository.AlertRepository
-import com.example.data.repository.AuthRepository
-import com.example.data.repository.DebridRepository
-import com.example.data.repository.HistoryRepository
-import com.example.data.repository.LibraryRepository
-import com.example.data.repository.MediaRepository
+import com.example.core.security.PersistentCookieJar
+import com.example.data.web.OffscreenDomExtractor
+import com.example.data.web.WebsiteHttpClient
+import com.example.data.web.WebsitePageRepository
 import com.example.util.NotificationHelper
 
 class AppContainer(context: Context) {
   val appContext: Context = context.applicationContext
   val vault = KeystoreCredentialVault(appContext)
   val preferences = AppPreferences(appContext)
-  val database = TorrentClawDatabase.getInstance(appContext)
-  val networkModule = NetworkModule(appContext, vault)
-  val debridService = DebridService()
-  val authRepository = AuthRepository(vault, preferences, networkModule, debridService)
-  val mediaRepository =
-    MediaRepository(
-      appContext,
-      networkModule,
-      database.cachedDiscoveryDao(),
-      authRepository,
-      debridService,
-    )
-  val libraryRepository =
-    LibraryRepository(database.savedMediaDao(), database.savedTorrentDao())
-  val historyRepository =
-    HistoryRepository(database.searchHistoryDao(), database.downloadHistoryDao())
-  val alertRepository =
-    AlertRepository(appContext, database.contentAlertDao(), mediaRepository, authRepository)
-  val debridRepository = DebridRepository(authRepository, debridService)
+  val cookieJar = PersistentCookieJar(vault)
+  val httpClient = WebsiteHttpClient(cookieJar)
+  val domExtractor = OffscreenDomExtractor(appContext, cookieJar)
+  val websitePageRepository = WebsitePageRepository(httpClient, domExtractor)
 }
 
 class TorrentClawApp : Application(), ImageLoaderFactory {

@@ -2,15 +2,14 @@ package com.example
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
-import com.example.core.preferences.UserPreferencesState
 import com.example.core.security.KeystoreCredentialVault
-import com.example.data.model.MediaType
-import com.example.data.model.TorrentRelease
-import com.example.data.model.TrueSpecStatus
-import com.example.data.model.computeSmartRecommendation
-import com.example.data.model.deduplicateTorrents
-import com.example.data.model.parseImdbOrTmdbUrl
-import com.example.data.remote.TorrentClawJsonParser
+import com.example.core.security.PersistentCookieJar
+import com.example.data.web.HtmlPageParser
+import com.example.data.web.NavigationGuard
+import com.example.data.web.UrlDecision
+import com.example.data.web.WebPageKind
+import okhttp3.Cookie
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -31,122 +30,60 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `imdb and tmdb url parser handles standard urls`() {
-    val imdb = parseImdbOrTmdbUrl("https://www.imdb.com/title/tt1375666/?ref_=nv_sr_srsg_0")
-    assertNotNull(imdb)
-    assertEquals("tt1375666", imdb?.imdbId)
+  fun `incoming intent normalizes imdb links, deep links, and magnets`() {
+    val deepLink = NavigationGuard.normalizeIncomingIntent("torrentclaw://search?q=inception", null)
+    assertTrue(deepLink is UrlDecision.InternalPage)
+    assertEquals("https://torrentclaw.com/search?q=inception", (deepLink as UrlDecision.InternalPage).normalizedUrl)
 
-    val tmdbMovie = parseImdbOrTmdbUrl("https://www.themoviedb.org/movie/27205-inception")
-    assertNotNull(tmdbMovie)
-    assertEquals(27205, tmdbMovie?.tmdbId)
-    assertEquals(MediaType.MOVIE, tmdbMovie?.mediaType)
+    val sharedImdb = NavigationGuard.normalizeIncomingIntent(null, "https://www.imdb.com/title/tt1375666/")
+    assertTrue(sharedImdb is UrlDecision.InternalPage)
+    assertTrue((sharedImdb as UrlDecision.InternalPage).normalizedUrl.startsWith("https://torrentclaw.com/search?q="))
 
-    val tmdbShow = parseImdbOrTmdbUrl("https://www.themoviedb.org/tv/1396-breaking-bad")
-    assertNotNull(tmdbShow)
-    assertEquals(1396, tmdbShow?.tmdbId)
-    assertEquals(MediaType.SHOW, tmdbShow?.mediaType)
+    val magnet = NavigationGuard.normalizeIncomingIntent("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567", null)
+    assertTrue(magnet is UrlDecision.MagnetAction)
   }
 
   @Test
-  fun `json parser extracts media, torrents, and truespec flags accurately`() {
-    val samplePayload =
+  fun `html parser parses listing page and pagination`() {
+    val html =
       """
-      {
-        "total": 1,
-        "results": [
-          {
-            "id": "27205",
-            "tmdb_id": 27205,
-            "imdb_id": "tt1375666",
-            "title": "Inception",
-            "year": 2010,
-            "type": "movie",
-            "rating": 8.4,
-            "genres": ["Action", "Sci-Fi"],
-            "poster_path": "/9gk7adHYeDvHkCSEqAvQNLV5Uge.jpg",
-            "torrents": [
-              {
-                "info_hash": "0123456789abcdef0123456789abcdef01234567",
-                "release_name": "Inception.2010.2160p.UHD.BluRay.REMUX.DV.HEVC.Atmos-TEST",
-                "resolution": "2160p",
-                "quality_score": 95,
-                "seeders": 120,
-                "leechers": 12,
-                "size_bytes": 54000000000,
-                "truespec": {
-                  "status": "verified",
-                  "video_codec": "HEVC",
-                  "resolution": "2160p"
-                }
-              }
-            ]
-          }
-        ]
-      }
+      <html><body><main>
+        <h1>Search Results</h1>
+        <div class="pagination">
+          <a href="/search?q=dune&page=2">Next</a>
+        </div>
+        <article class="card">
+          <a href="/movie/693134">
+            <img src="https://image.tmdb.org/t/p/w500/dune.jpg" alt="Dune: Part Two" />
+            <h3>Dune: Part Two</h3>
+          </a>
+        </article>
+      </main></body></html>
       """
         .trimIndent()
-
-    val parsed = TorrentClawJsonParser.parseSearchResponse(samplePayload)
-    assertEquals(1, parsed.mediaItems.size)
-    val media = parsed.mediaItems.first()
-    assertEquals("Inception", media.title)
-    assertEquals(1, media.torrents.size)
-    val rel = media.torrents.first()
-    assertEquals(TrueSpecStatus.VERIFIED, rel.trueSpecStatus)
-    assertEquals("HEVC", rel.videoCodec)
-    assertEquals(95, rel.qualityScore)
+    val parsed = HtmlPageParser.parse("https://torrentclaw.com/search?q=dune", html)
+    val listing = parsed.kind as? WebPageKind.Listing
+    assertNotNull(listing)
+    assertEquals(1, listing?.cards?.size)
+    assertEquals("https://torrentclaw.com/search?q=dune&page=2", listing?.pagination?.nextUrl)
   }
 
   @Test
-  fun `deduplicateTorrents keeps highest quality release per infoHash`() {
-    val hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    val low = TorrentRelease(infoHash = hash, releaseName = "Low", qualityScore = 40)
-    val high = TorrentRelease(infoHash = hash, releaseName = "High", qualityScore = 88)
-    val deduped = deduplicateTorrents(listOf(low, high))
-    assertEquals(1, deduped.size)
-    assertEquals(88, deduped.first().qualityScore)
-  }
-
-  @Test
-  fun `smart recommendation honors user resolution and TrueSpec preferences`() {
-    val prefs =
-      UserPreferencesState(
-        preferredResolutions = setOf("1080p"),
-        preferredCodecs = setOf("HEVC"),
-        preferTrueSpecVerified = true,
-      )
-    val unverified4k =
-      TorrentRelease(
-        infoHash = "1111111111111111111111111111111111111111",
-        releaseName = "Title.2160p.H264",
-        resolution = "2160p",
-        videoCodec = "H.264",
-        qualityScore = 76,
-        seeders = 200,
-        trueSpecStatus = TrueSpecStatus.UNVERIFIED,
-      )
-    val verified1080 =
-      TorrentRelease(
-        infoHash = "2222222222222222222222222222222222222222",
-        releaseName = "Title.1080p.HEVC",
-        resolution = "1080p",
-        videoCodec = "HEVC",
-        qualityScore = 74,
-        seeders = 45,
-        trueSpecStatus = TrueSpecStatus.VERIFIED,
-      )
-    val rec = computeSmartRecommendation(listOf(unverified4k, verified1080), prefs)
-    assertNotNull(rec)
-    assertEquals(verified1080.infoHash, rec?.release?.infoHash)
-    assertTrue(rec?.reasons?.contains("TrueSpec Verified") == true)
-  }
-
-  @Test
-  fun `credential vault round-trips secret`() {
+  fun `credential vault and cookie jar persist torrentclaw session cookies`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
     val vault = KeystoreCredentialVault(context)
-    vault.putSecret("test_key", "tc_live_secret_123456")
-    assertEquals("tc_live_secret_123456", vault.getSecret("test_key"))
+    val jar = PersistentCookieJar(vault)
+    val cookie =
+      Cookie.Builder()
+        .name("tc_auth")
+        .value("session_123")
+        .domain("torrentclaw.com")
+        .path("/")
+        .secure()
+        .build()
+    jar.saveFromResponse("https://torrentclaw.com/login".toHttpUrl(), listOf(cookie))
+    assertTrue(jar.hasSessionCookies())
+    jar.clearSessionCookies()
     vault.clearAll()
   }
 }

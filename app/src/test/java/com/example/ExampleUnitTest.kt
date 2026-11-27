@@ -1,25 +1,12 @@
 package com.example
 
-import com.example.core.preferences.UserPreferencesState
-import com.example.data.model.MediaItem
-import com.example.data.model.MediaType
-import com.example.data.model.TorrentListFilterState
-import com.example.data.model.TorrentListSort
-import com.example.data.model.TorrentRelease
-import com.example.data.model.TorrentSizeFilter
-import com.example.data.model.TrueSpecStatus
-import com.example.data.model.buildMagnetUri
-import com.example.data.model.computeSmartRecommendation
-import com.example.data.model.deduplicateTorrents
-import com.example.data.model.extractAvailableResolutions
-import com.example.data.model.extractTorrentFilterFacets
-import com.example.data.model.filterAndSortTorrents
-import com.example.data.model.formatFileSize
-import com.example.data.model.matchesSeasonAndEpisode
-import com.example.data.model.matchesTargetMediaItem
-import com.example.data.model.matchesTargetMediaRelease
-import com.example.data.model.parseImdbOrTmdbUrl
-import com.example.data.remote.TorrentClawJsonParser
+import com.example.core.security.PersistentCookieJar
+import com.example.data.web.HtmlPageParser
+import com.example.data.web.NavigationGuard
+import com.example.data.web.UrlDecision
+import com.example.data.web.WebPageKind
+import okhttp3.Cookie
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -29,429 +16,214 @@ import org.junit.Test
 class ExampleUnitTest {
 
   @Test
-  fun `imdb and tmdb url parser handles standard urls`() {
-    val imdb = parseImdbOrTmdbUrl("https://www.imdb.com/title/tt1375666/?ref_=nv_sr_srsg_0")
-    assertNotNull(imdb)
-    assertEquals("tt1375666", imdb?.imdbId)
+  fun `navigation guard allows torrentclaw urls, intercepts magnet and torrent links, and blocks external popups`() {
+    val home = NavigationGuard.classify("http://torrentclaw.com/search?q=dune")
+    assertTrue(home is UrlDecision.InternalPage)
+    assertEquals("https://torrentclaw.com/search?q=dune", (home as UrlDecision.InternalPage).normalizedUrl)
 
-    val tmdbMovie = parseImdbOrTmdbUrl("https://www.themoviedb.org/movie/27205-inception")
-    assertNotNull(tmdbMovie)
-    assertEquals(27205, tmdbMovie?.tmdbId)
-    assertEquals(MediaType.MOVIE, tmdbMovie?.mediaType)
+    val relative = NavigationGuard.classify("/movie/12345", "https://torrentclaw.com/search?q=dune")
+    assertTrue(relative is UrlDecision.InternalPage)
+    assertEquals("https://torrentclaw.com/movie/12345", (relative as UrlDecision.InternalPage).normalizedUrl)
 
-    val tmdbShow = parseImdbOrTmdbUrl("https://www.themoviedb.org/tv/1396-breaking-bad")
-    assertNotNull(tmdbShow)
-    assertEquals(1396, tmdbShow?.tmdbId)
-    assertEquals(MediaType.SHOW, tmdbShow?.mediaType)
+    val magnet = NavigationGuard.classify("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Dune.Part.Two.2024")
+    assertTrue(magnet is UrlDecision.MagnetAction)
+    assertEquals("Dune.Part.Two.2024", (magnet as UrlDecision.MagnetAction).displayName)
+
+    val torrentFile = NavigationGuard.classify("/torrent/0123456789abcdef0123456789abcdef01234567", "https://torrentclaw.com/")
+    assertTrue(torrentFile is UrlDecision.TorrentFileAction)
+
+    val popupAd = NavigationGuard.classify("https://evil-popup.example.com/offer")
+    assertTrue(popupAd is UrlDecision.BlockedExternal)
+
+    val xssScheme = NavigationGuard.classify("javascript:alert(1)")
+    assertTrue(xssScheme is UrlDecision.BlockedExternal)
+
+    val dataScheme = NavigationGuard.classify("data:text/html,<script>alert(1)</script>")
+    assertTrue(dataScheme is UrlDecision.BlockedExternal)
   }
 
   @Test
-  fun `json parser extracts media, torrents, and truespec flags accurately`() {
-    val samplePayload =
+  fun `html parser parses home sections, search forms, and media cards cleanly`() {
+    val html =
       """
-      {
-        "total": 1,
-        "results": [
-          {
-            "id": "27205",
-            "tmdb_id": 27205,
-            "imdb_id": "tt1375666",
-            "title": "Inception",
-            "year": 2010,
-            "type": "movie",
-            "rating": 8.4,
-            "genres": ["Action", "Sci-Fi"],
-            "poster_path": "/9gk7adHYeDvHkCSEqAvQNLV5Uge.jpg",
-            "torrents": [
-              {
-                "info_hash": "0123456789abcdef0123456789abcdef01234567",
-                "release_name": "Inception.2010.2160p.UHD.BluRay.REMUX.DV.HEVC.Atmos-TEST",
-                "resolution": "2160p",
-                "quality_score": 95,
-                "seeders": 120,
-                "leechers": 12,
-                "size_bytes": 54000000000,
-                "truespec": {
-                  "status": "verified",
-                  "video_codec": "HEVC",
-                  "resolution": "2160p"
-                }
-              }
-            ]
-          }
-        ]
-      }
-      """
-        .trimIndent()
-
-    val parsed = TorrentClawJsonParser.parseSearchResponse(samplePayload)
-    assertEquals(1, parsed.mediaItems.size)
-    val media = parsed.mediaItems.first()
-    assertEquals("Inception", media.title)
-    assertEquals(1, media.torrents.size)
-    val rel = media.torrents.first()
-    assertEquals(TrueSpecStatus.VERIFIED, rel.trueSpecStatus)
-    assertEquals("HEVC", rel.videoCodec)
-    assertEquals(95, rel.qualityScore)
-  }
-
-  @Test
-  fun `json parser avoids raw info hashes as torrent titles and resolves alternative fields`() {
-    val hash1 = "5f3b50774263a22272ba670943a07d132f91a06e"
-    val hash2 = "ac643ba9c4318b5a2bf107cd79df358e7bea2da1"
-    val hash3 = "baf93326d33672646e9b79afe877652b85d69b9f"
-    val payload =
-      """
-      {
-        "results": [
-          {
-            "info_hash": "$hash1",
-            "name": "$hash1",
-            "resolution": "2160p",
-            "source_type": "bluray",
-            "video_codec": "x265",
-            "audio_codec": "truehd",
-            "audio_channels": 8,
-            "size_bytes": 14506250000,
-            "seeders": 127,
-            "tracker": "torrents-csv"
-          },
-          {
-            "info_hash": "$hash2",
-            "raw_name": "The.Odyssey.2026.2160p.BluRay.HEVC.TrueHD.7.1-GRP",
-            "resolution": "2160p",
-            "quality_score": 89
-          },
-          {
-            "info_hash": "$hash3",
-            "magnet": "magnet:?xt=urn:btih:$hash3&dn=The.Odyssey.2026.1080p.BluRay.x264.DTS-SCENE",
-            "resolution": "1080p",
-            "quality_score": 87
-          }
-        ]
-      }
+      <!doctype html>
+      <html>
+        <head><title>TorrentClaw - Media Index</title></head>
+        <body>
+          <header>
+            <nav>
+              <a href="/">Home</a>
+              <a href="/search?type=movie">Movies</a>
+              <a href="/search?type=tv">TV Shows</a>
+              <a href="/login">Sign In</a>
+            </nav>
+            <form action="/search" method="GET">
+              <input type="search" name="q" placeholder="Search titles..." />
+              <button type="submit">Search</button>
+            </form>
+          </header>
+          <main>
+            <section class="hero">
+              <h1>Discover Verified Torrents</h1>
+              <p>Fast multi-source index with TrueSpec quality metrics.</p>
+            </section>
+            <section>
+              <h2>Trending Movies</h2>
+              <article class="card">
+                <a href="/movie/693134">
+                  <img src="https://image.tmdb.org/t/p/w500/dune.jpg" alt="Dune: Part Two" />
+                  <h3>Dune: Part Two</h3>
+                  <span>2024 • ★ 8.3</span>
+                </a>
+              </article>
+            </section>
+          </main>
+        </body>
+      </html>
       """
         .trimIndent()
 
-    val parsed = TorrentClawJsonParser.parseSearchResponse(payload, fallbackMediaTitle = "The Odyssey")
-    assertEquals(3, parsed.torrents.size)
+    val page = HtmlPageParser.parse("https://torrentclaw.com/", html)
+    assertEquals("TorrentClaw - Media Index", page.pageTitle)
+    assertFalse(page.isSignedIn)
+    assertEquals(4, page.headerLinks.size)
+    assertNotNull(page.searchForm)
+    assertEquals("https://torrentclaw.com/search", page.searchForm?.actionUrl)
 
-    val t1 = parsed.torrents[0]
-    assertFalse("Release name must not show raw hash", t1.releaseName.equals(hash1, ignoreCase = true))
-    assertTrue(t1.releaseName.contains("The Odyssey"))
-    assertTrue(t1.releaseName.contains("2160p"))
-    assertTrue(t1.releaseName.contains("BluRay"))
-    assertEquals("7.1", t1.audioChannels)
-    assertFalse(t1.hasExplicitReleaseName)
-
-    val t2 = parsed.torrents[1]
-    assertEquals("The.Odyssey.2026.2160p.BluRay.HEVC.TrueHD.7.1-GRP", t2.releaseName)
-    assertTrue(t2.hasExplicitReleaseName)
-
-    val t3 = parsed.torrents[2]
-    assertEquals("The.Odyssey.2026.1080p.BluRay.x264.DTS-SCENE", t3.releaseName)
+    val home = page.kind as? WebPageKind.Home
+    assertNotNull(home)
+    assertEquals("Discover Verified Torrents", home?.heroTitle)
+    assertEquals(1, home?.sections?.size)
+    val card = home?.sections?.first()?.cards?.first()
+    assertEquals("Dune: Part Two", card?.title)
+    assertEquals("https://torrentclaw.com/movie/693134", card?.url)
+    assertEquals("2024", card?.year)
+    assertEquals("8.3", card?.rating)
   }
 
   @Test
-  fun `filterAndSortTorrents filters by quality and size bucket and sorts accurately`() {
-    val gb = 1024L * 1024L * 1024L
-    val list =
-      listOf(
-        TorrentRelease(
-          infoHash = "1111111111111111111111111111111111111111",
-          releaseName = "Small 720p",
-          resolution = "720p",
-          sizeBytes = (1.4 * gb).toLong(),
-          qualityScore = 60,
-          seeders = 40,
-        ),
-        TorrentRelease(
-          infoHash = "2222222222222222222222222222222222222222",
-          releaseName = "Mid 1080p",
-          resolution = "1080p",
-          sizeBytes = 6L * gb,
-          qualityScore = 82,
-          seeders = 90,
-        ),
-        TorrentRelease(
-          infoHash = "3333333333333333333333333333333333333333",
-          releaseName = "Big 4K",
-          resolution = "2160p",
-          sizeBytes = 25L * gb,
-          qualityScore = 95,
-          seeders = 25,
-        ),
-        TorrentRelease(
-          infoHash = "4444444444444444444444444444444444444444",
-          releaseName = "Compact 4K",
-          resolution = "2160p",
-          sizeBytes = 12L * gb,
-          qualityScore = 91,
-          seeders = 150,
-        ),
-      )
+  fun `html parser parses detail page torrents, magnet dn names, and season filters`() {
+    val html =
+      """
+      <!doctype html>
+      <html>
+        <head><title>Severance (2022) - TorrentClaw</title></head>
+        <body>
+          <main>
+            <div class="hero">
+              <div class="poster"><img src="https://image.tmdb.org/t/p/w500/sev.jpg" /></div>
+              <h1>Severance (2022)</h1>
+              <p class="overview">Mark leads a team of office workers whose memories have been surgically divided.</p>
+              <span class="genre"><a href="/search?genre=Sci-Fi">Sci-Fi</a></span>
+            </div>
+            <div class="season-tabs">
+              <a href="/tv/95396?season=1" class="active">Season 1</a>
+              <a href="/tv/95396?season=2">Season 2</a>
+            </div>
+            <table>
+              <tr>
+                <td class="title">5f3b50774263a22272ba670943a07d132f91a06e</td>
+                <td>2160p • HEVC • Dolby Vision • TrueSpec Verified • 14.2 GB • ▲ 184 ▼ 12 • Score 94</td>
+                <td>
+                  <a href="magnet:?xt=urn:btih:5f3b50774263a22272ba670943a07d132f91a06e&dn=Severance.S01.2160p.ATVP.WEB-DL.DDP5.1.DV.HEVC">Magnet</a>
+                  <a href="/torrent/5f3b50774263a22272ba670943a07d132f91a06e">Download .torrent</a>
+                </td>
+              </tr>
+            </table>
+          </main>
+        </body>
+      </html>
+      """
+        .trimIndent()
 
-    val resCounts = extractAvailableResolutions(list)
-    assertEquals(listOf("2160p" to 2, "1080p" to 1, "720p" to 1), resCounts)
+    val page = HtmlPageParser.parse("https://torrentclaw.com/tv/95396", html)
+    val detail = page.kind as? WebPageKind.Detail
+    assertNotNull(detail)
+    assertEquals("Severance", detail?.title)
+    assertEquals("2022", detail?.year)
+    assertEquals(2, detail?.seasonLinks?.size)
+    assertEquals(1, detail?.torrents?.size)
 
-    val only4kSmallestFirst =
-      filterAndSortTorrents(list, selectedResolution = "2160p", sizeFilter = TorrentSizeFilter.ALL, sortBy = TorrentListSort.SMALLEST_SIZE)
-    assertEquals(listOf("Compact 4K", "Big 4K"), only4kSmallestFirst.map { it.releaseName })
-
-    val over20Gb =
-      filterAndSortTorrents(list, selectedResolution = null, sizeFilter = TorrentSizeFilter.OVER_20_GB, sortBy = TorrentListSort.BEST_QUALITY)
-    assertEquals(listOf("Big 4K"), over20Gb.map { it.releaseName })
-
-    val under2Gb =
-      filterAndSortTorrents(list, selectedResolution = null, sizeFilter = TorrentSizeFilter.UNDER_2_GB, sortBy = TorrentListSort.BEST_QUALITY)
-    assertEquals(listOf("Small 720p"), under2Gb.map { it.releaseName })
-
-    val mostSeeded =
-      filterAndSortTorrents(list, selectedResolution = null, sizeFilter = TorrentSizeFilter.ALL, sortBy = TorrentListSort.MOST_SEEDED)
-    assertEquals("Compact 4K", mostSeeded.first().releaseName)
+    val torrent = detail?.torrents?.first()
+    assertEquals("Severance.S01.2160p.ATVP.WEB-DL.DDP5.1.DV.HEVC", torrent?.title)
+    assertEquals("2160p", torrent?.resolution)
+    assertEquals("14.2 GB", torrent?.size)
+    assertEquals("184", torrent?.seeders)
+    assertEquals("12", torrent?.leechers)
+    assertEquals("94", torrent?.qualityScore)
+    assertEquals("TrueSpec Verified", torrent?.trueSpecBadge)
+    assertNotNull(torrent?.magnetUrl)
+    assertEquals(
+      "https://torrentclaw.com/torrent/5f3b50774263a22272ba670943a07d132f91a06e",
+      torrent?.torrentDownloadUrl,
+    )
   }
 
   @Test
-  fun `unified torrent filter facets and advanced filters work cleanly`() {
-    val gb = 1024L * 1024L * 1024L
-    val releases =
-      listOf(
-        TorrentRelease(
-          infoHash = "aaaa",
-          releaseName = "Movie.2026.2160p.BluRay.x265.TrueHD",
-          resolution = "2160p",
-          sourceType = "bluray",
-          videoCodec = "x265",
-          audioCodec = "truehd",
-          hdrFormat = "Dolby Vision",
-          sizeBytes = 14L * gb,
-          seeders = 120,
-          qualityScore = 96,
-          trueSpecStatus = TrueSpecStatus.VERIFIED,
-        ),
-        TorrentRelease(
-          infoHash = "bbbb",
-          releaseName = "Movie.2026.2160p.WEB-DL.HEVC.Atmos",
-          resolution = "2160p",
-          sourceType = "web-dl",
-          videoCodec = "hevc",
-          audioCodec = "atmos",
-          hdrFormat = "HDR10",
-          sizeBytes = 9L * gb,
-          seeders = 45,
-          qualityScore = 88,
-          trueSpecStatus = TrueSpecStatus.UNVERIFIED,
-        ),
-        TorrentRelease(
-          infoHash = "cccc",
-          releaseName = "Movie.2026.1080p.BluRay.x264.DTS",
-          resolution = "1080p",
-          sourceType = "bluray",
-          videoCodec = "x264",
-          audioCodec = "dts",
-          sizeBytes = 6L * gb,
-          seeders = 0,
-          qualityScore = 80,
-          trueSpecStatus = TrueSpecStatus.VERIFIED,
-        ),
-        TorrentRelease(
-          infoHash = "dddd",
-          releaseName = "Movie.2026.720p.WEBRip.x264.AAC",
-          resolution = "720p",
-          sourceType = "webrip",
-          videoCodec = "x264",
-          audioCodec = "aac",
-          sizeBytes = 2L * gb,
-          seeders = 18,
-          qualityScore = 65,
-        ),
-      )
+  fun `html parser extracts auth form with hidden csrf token and detects spa shells`() {
+    val loginHtml =
+      """
+      <html><body><main>
+        <h1>Sign in to TorrentClaw</h1>
+        <form action="/login" method="POST">
+          <input type="hidden" name="_csrf" value="abc123token" />
+          <label for="email">Email</label>
+          <input id="email" type="email" name="email" required />
+          <label for="pwd">Password</label>
+          <input id="pwd" type="password" name="password" required />
+          <button type="submit">Sign In</button>
+        </form>
+      </main></body></html>
+      """
+        .trimIndent()
 
-    val facets = extractTorrentFilterFacets(releases)
-    assertEquals(listOf("HEVC" to 2, "H.264" to 2), facets.codecs)
-    assertEquals(2, facets.verifiedCount)
+    val authPage = HtmlPageParser.parse("https://torrentclaw.com/login", loginHtml)
+    val auth = authPage.kind as? WebPageKind.Auth
+    assertNotNull(auth)
+    assertEquals("POST", auth?.form?.method)
+    assertEquals(3, auth?.form?.fields?.size)
+    assertTrue(auth?.form?.fields?.any { it.isHidden && it.name == "_csrf" && it.value == "abc123token" } == true)
 
-    // Multi-resolution + unified HEVC codec + seeded > 0
-    val multiResHevc =
-      filterAndSortTorrents(
-        releases,
-        TorrentListFilterState(
-          resolutions = setOf("2160p", "1080p"),
-          codecs = setOf("HEVC"),
-          minSeeders = 1,
-          sortBy = TorrentListSort.LARGEST_SIZE,
-        ),
-      )
-    assertEquals(listOf("aaaa", "bbbb"), multiResHevc.map { it.infoHash })
-
-    // Custom GB range + keyword + TrueSpec verified
-    val customRange =
-      filterAndSortTorrents(
-        releases,
-        TorrentListFilterState(
-          customMinSizeGb = 5f,
-          customMaxSizeGb = 12f,
-          verifiedOnly = true,
-          keyword = "dts",
-        ),
-      )
-    assertEquals(listOf("cccc"), customRange.map { it.infoHash })
+    val spaShell = """<html><body><div id="__next"></div><script src="/app.js"></script></body></html>"""
+    assertTrue(HtmlPageParser.needsClientDomSnapshot(spaShell))
+    assertFalse(HtmlPageParser.needsClientDomSnapshot(loginHtml))
   }
 
   @Test
-  fun `media and torrent matching excludes unrelated titles, wrong years, and mismatched IDs`() {
-    val targetMovie =
-      MediaItem(
-        id = "1368337",
-        tmdbId = 1368337,
-        imdbId = "tt33764258",
-        title = "The Odyssey",
-        year = 2026,
-        mediaType = MediaType.MOVIE,
-      )
+  fun `persistent cookie jar stores torrentclaw cookies and isolates external domains`() {
+    var now = 1_000_000L
+    val jar = PersistentCookieJar(vault = null, clockMs = { now })
 
-    val exactCandidate =
-      MediaItem(
-        id = "1368337",
-        tmdbId = 1368337,
-        imdbId = "tt33764258",
-        title = "The Odyssey",
-        year = 2026,
-        mediaType = MediaType.MOVIE,
-      )
-    val oldOdyssey =
-      MediaItem(
-        id = "8888",
-        tmdbId = 8888,
-        imdbId = "tt0118414",
-        title = "The Odyssey",
-        year = 1997,
-        mediaType = MediaType.SHOW,
-      )
-    val unrelatedMovie =
-      MediaItem(
-        id = "99999",
-        tmdbId = 99999,
-        title = "2001: A Space Odyssey",
-        year = 1968,
-        mediaType = MediaType.MOVIE,
-      )
+    val tcUrl = "https://torrentclaw.com/login".toHttpUrl()
+    val externalUrl = "https://evil-tracker.example.com/".toHttpUrl()
 
-    assertTrue(matchesTargetMediaItem(exactCandidate, targetMovie))
-    assertFalse(matchesTargetMediaItem(oldOdyssey, targetMovie))
-    assertFalse(matchesTargetMediaItem(unrelatedMovie, targetMovie))
+    val sessionCookie =
+      Cookie.Builder()
+        .name("tc_session")
+        .value("secret_session_value")
+        .domain("torrentclaw.com")
+        .path("/")
+        .secure()
+        .httpOnly()
+        .expiresAt(now + 60_000L)
+        .build()
 
-    // Matching by TMDB ID
-    val idMatchRelease =
-      TorrentRelease(
-        infoHash = "1111",
-        releaseName = "2160p BluRay",
-        tmdbId = 1368337,
-        hasExplicitReleaseName = false,
-      )
-    assertTrue(matchesTargetMediaRelease(idMatchRelease, targetMovie))
+    val foreignCookie =
+      Cookie.Builder()
+        .name("ad_id")
+        .value("xyz")
+        .domain("evil-tracker.example.com")
+        .path("/")
+        .expiresAt(now + 60_000L)
+        .build()
 
-    // Reject different TMDB ID even if title matches
-    val wrongIdRelease =
-      TorrentRelease(
-        infoHash = "2222",
-        releaseName = "The.Odyssey.2026.1080p.BluRay",
-        tmdbId = 999999,
-        hasExplicitReleaseName = true,
-      )
-    assertFalse(matchesTargetMediaRelease(wrongIdRelease, targetMovie))
+    jar.saveFromResponse(tcUrl, listOf(sessionCookie, foreignCookie))
+    assertTrue(jar.hasSessionCookies())
+    assertEquals(1, jar.loadForRequest("https://torrentclaw.com/account".toHttpUrl()).size)
+    assertEquals(0, jar.loadForRequest(externalUrl).size)
 
-    // Reject synthesized non-explicit name without IDs
-    val synthesizedNoId =
-      TorrentRelease(
-        infoHash = "3333",
-        releaseName = "The Odyssey 2160p BluRay",
-        hasExplicitReleaseName = false,
-      )
-    assertFalse(matchesTargetMediaRelease(synthesizedNoId, targetMovie))
-
-    // Reject different movie sharing partial words or wrong year
-    val spaceOdyssey =
-      TorrentRelease(
-        infoHash = "4444",
-        releaseName = "2001.A.Space.Odyssey.1968.2160p.BluRay",
-        hasExplicitReleaseName = true,
-      )
-    assertFalse(matchesTargetMediaRelease(spaceOdyssey, targetMovie))
-
-    // Accept explicit matching title + year without IDs
-    val validTitleRelease =
-      TorrentRelease(
-        infoHash = "5555",
-        releaseName = "The.Odyssey.2026.2160p.WEB-DL.HEVC",
-        hasExplicitReleaseName = true,
-      )
-    assertTrue(matchesTargetMediaRelease(validTitleRelease, targetMovie))
-  }
-
-  @Test
-  fun `season and episode matching scopes show torrents cleanly`() {
-    val s1e5 = TorrentRelease(infoHash = "a", releaseName = "Severance.S01E05.1080p.WEB-DL")
-    val s1e2 = TorrentRelease(infoHash = "b", releaseName = "Severance.S01E02.1080p.WEB-DL")
-    val s2e5 = TorrentRelease(infoHash = "c", releaseName = "Severance.S02E05.1080p.WEB-DL")
-    val s1Pack = TorrentRelease(infoHash = "d", releaseName = "Severance.S01.COMPLETE.1080p.BluRay")
-
-    assertTrue(matchesSeasonAndEpisode(s1e5, seasonFilter = 1, episodeFilter = 5))
-    assertFalse(matchesSeasonAndEpisode(s1e2, seasonFilter = 1, episodeFilter = 5))
-    assertFalse(matchesSeasonAndEpisode(s2e5, seasonFilter = 1, episodeFilter = 5))
-    assertTrue(matchesSeasonAndEpisode(s1Pack, seasonFilter = 1, episodeFilter = 5))
-    assertFalse(matchesSeasonAndEpisode(s1Pack, seasonFilter = 2, episodeFilter = null))
-  }
-
-  @Test
-  fun `deduplicateTorrents keeps highest quality release per infoHash`() {
-    val hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    val low = TorrentRelease(infoHash = hash, releaseName = "Low", qualityScore = 40)
-    val high = TorrentRelease(infoHash = hash, releaseName = "High", qualityScore = 88)
-    val deduped = deduplicateTorrents(listOf(low, high))
-    assertEquals(1, deduped.size)
-    assertEquals(88, deduped.first().qualityScore)
-  }
-
-  @Test
-  fun `smart recommendation honors user resolution and TrueSpec preferences`() {
-    val prefs =
-      UserPreferencesState(
-        preferredResolutions = setOf("1080p"),
-        preferredCodecs = setOf("HEVC"),
-        preferTrueSpecVerified = true,
-      )
-    val unverified4k =
-      TorrentRelease(
-        infoHash = "1111111111111111111111111111111111111111",
-        releaseName = "Title.2160p.H264",
-        resolution = "2160p",
-        videoCodec = "H.264",
-        qualityScore = 76,
-        seeders = 200,
-        trueSpecStatus = TrueSpecStatus.UNVERIFIED,
-      )
-    val verified1080 =
-      TorrentRelease(
-        infoHash = "2222222222222222222222222222222222222222",
-        releaseName = "Title.1080p.HEVC",
-        resolution = "1080p",
-        videoCodec = "HEVC",
-        qualityScore = 74,
-        seeders = 45,
-        trueSpecStatus = TrueSpecStatus.VERIFIED,
-      )
-    val rec = computeSmartRecommendation(listOf(unverified4k, verified1080), prefs)
-    assertNotNull(rec)
-    assertEquals(verified1080.infoHash, rec?.release?.infoHash)
-    assertTrue(rec?.reasons?.contains("TrueSpec Verified") == true)
-  }
-
-  @Test
-  fun `magnet builder and size formatter produce valid outputs`() {
-    val magnet = buildMagnetUri("0123456789abcdef0123456789abcdef01234567", "Inception 2010")
-    assertTrue(magnet.startsWith("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"))
-    assertTrue(magnet.contains("dn=Inception+2010"))
-    assertEquals("1.50 GB", formatFileSize((1.5 * 1024 * 1024 * 1024).toLong()))
+    // Advance clock past expiry
+    now += 120_000L
+    assertFalse(jar.hasSessionCookies())
   }
 }
