@@ -549,6 +549,22 @@ class TorrentClawRepository(
       }
     }
 
+    // Fetch public TorrentClaw web page when any releases lack direct magnet/infoHash
+    // so every Magnet button holds a genuine magnet:?xt=urn:btih:... URI.
+    val needsMagnetEnrichment =
+      resolvedMedia.hasTorrents != false &&
+        (collectedTorrents.isEmpty() || collectedTorrents.any { !it.hasDirectMagnet })
+    val publicContentPath =
+      resolvedMedia.contentUrl?.takeIf { it.isNotBlank() }
+        ?: buildFallbackContentPath(resolvedMedia)
+
+    val publicPageDeferred =
+      if (needsMagnetEnrichment && publicContentPath != null) {
+        async { network.fetchPublicContentPage(publicContentPath) }
+      } else {
+        null
+      }
+
     val expansionState =
       MediaExpansionState(
         baseMedia = resolvedMedia,
@@ -577,6 +593,27 @@ class TorrentClawRepository(
         chunkSize = 2,
         interChunkDelayMs = 300L,
       )
+    }
+
+    publicPageDeferred?.await()?.getOrNull()?.let { html ->
+      val pageTorrents =
+        TorrentClawJsonParser.parsePublicContentPageTorrents(
+          html = html,
+          fallbackMediaTitle = resolvedMedia.title,
+          parentTitleId = resolvedMedia.id,
+          parentTmdbId = resolvedMedia.tmdbId,
+          parentImdbId = resolvedMedia.imdbId,
+          parentContentUrl = resolvedMedia.contentUrl ?: publicContentPath,
+        )
+      if (pageTorrents.isNotEmpty()) {
+        collectedTorrents.addAll(pageTorrents)
+        if (resolvedMedia.mediaType == MediaType.SHOW) {
+          pageTorrents.forEach { rel ->
+            val s = rel.seasonNumber ?: extractSeasonEpisodeFromName(rel.releaseName).first
+            if (s != null && s > 0) expansionState.knownSeasons.add(s)
+          }
+        }
+      }
     }
 
     val finalMedia = expansionState.baseMedia
@@ -1049,6 +1086,89 @@ class TorrentClawRepository(
       cast = fresh.cast.ifEmpty { existing.cast },
       watchProviders = fresh.watchProviders.ifEmpty { existing.watchProviders },
     )
+  }
+
+  suspend fun resolveMagnetForRelease(
+    release: TorrentRelease,
+    fallbackContentUrl: String? = null,
+  ): TorrentRelease {
+    if (release.hasDirectMagnet && release.resolvedMagnetUrl.isNotBlank()) {
+      return release
+    }
+    var targetPath =
+      release.contentUrl?.takeIf { it.isNotBlank() }
+        ?: fallbackContentUrl?.takeIf { it.isNotBlank() }
+
+    if (targetPath == null) {
+      val searchParams =
+        buildMap {
+          release.imdbId?.takeIf { it.isNotBlank() }?.let { put("imdbid", it) }
+            ?: release.tmdbId?.takeIf { it > 0 }?.let { put("tmdbid", it.toString()) }
+            ?: put("q", release.mediaTitle?.takeIf { it.isNotBlank() } ?: release.releaseName)
+          put("limit", "3")
+        }
+      val searchRaw = network.search(searchParams).getOrNull()
+      if (searchRaw != null) {
+        val parsed = TorrentClawJsonParser.parseSearchResponse(searchRaw, release.mediaTitle)
+        targetPath =
+          parsed.mediaItems.firstOrNull { item ->
+            release.titleId == item.id ||
+              (release.tmdbId != null && release.tmdbId == item.tmdbId) ||
+              (!release.imdbId.isNullOrBlank() && release.imdbId.equals(item.imdbId, true)) ||
+              !item.contentUrl.isNullOrBlank()
+          }?.contentUrl
+      }
+    }
+
+    if (targetPath.isNullOrBlank()) return release
+    val html = network.fetchPublicContentPage(targetPath).getOrNull() ?: return release
+    val pageTorrents =
+      TorrentClawJsonParser.parsePublicContentPageTorrents(
+        html = html,
+        fallbackMediaTitle = release.mediaTitle,
+        parentTitleId = release.titleId,
+        parentTmdbId = release.tmdbId,
+        parentImdbId = release.imdbId,
+        parentContentUrl = targetPath,
+      )
+    if (pageTorrents.isEmpty()) return release
+
+    val targetName = release.releaseName.trim().lowercase()
+    val match =
+      pageTorrents.firstOrNull { cand ->
+        cand.hasDirectMagnet &&
+          cand.releaseName.trim().lowercase() == targetName &&
+          (release.sizeBytes <= 0L || cand.sizeBytes == release.sizeBytes) &&
+          (release.trackerSource.isBlank() || cand.trackerSource.equals(release.trackerSource, true))
+      }
+        ?: pageTorrents.firstOrNull { cand ->
+          cand.hasDirectMagnet &&
+            cand.releaseName.trim().lowercase() == targetName &&
+            (release.sizeBytes <= 0L || cand.sizeBytes == release.sizeBytes)
+        }
+        ?: pageTorrents.firstOrNull { cand ->
+          cand.hasDirectMagnet && cand.releaseName.trim().lowercase() == targetName
+        }
+
+    return if (match != null) {
+      deduplicateTorrents(listOf(release, match)).firstOrNull() ?: release
+    } else {
+      release
+    }
+  }
+
+  private fun buildFallbackContentPath(media: MediaItem): String? {
+    val numericId = media.id.trim().takeIf { it.all(Char::isDigit) && it.isNotEmpty() } ?: return null
+    val slug =
+      media.title
+        .lowercase()
+        .replace(Regex("[^a-z0-9]+"), "-")
+        .trim('-')
+        .takeIf { it.isNotBlank() }
+        ?: return null
+    val prefix = if (media.mediaType == MediaType.SHOW) "shows" else "movies"
+    val yearPart = media.year?.takeIf { it > 1800 }?.let { "-$it" }.orEmpty()
+    return "/$prefix/$slug$yearPart-$numericId"
   }
 
   suspend fun downloadTorrentFile(release: TorrentRelease): Result<File> =

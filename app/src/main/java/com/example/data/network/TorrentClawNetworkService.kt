@@ -70,6 +70,51 @@ open class TorrentClawNetworkService(
   suspend fun fetchWatchProvidersByTmdb(tmdbId: String, country: String = "US"): Result<String> =
     executeWithMirrorFallback { it.getWatchProviders(tmdbId, country) }
 
+  open suspend fun fetchPublicContentPage(contentPath: String): Result<String> =
+    withContext(Dispatchers.IO) {
+      val trimmed = contentPath.trim()
+      if (trimmed.isBlank()) {
+        return@withContext Result.failure(IllegalArgumentException("Blank content path"))
+      }
+      val normalizedPath =
+        when {
+          trimmed.startsWith("https://torrentclaw.com", ignoreCase = true) ->
+            trimmed.substringAfter("torrentclaw.com")
+          trimmed.startsWith("https://torrentclaw.to", ignoreCase = true) ->
+            trimmed.substringAfter("torrentclaw.to")
+          trimmed.startsWith("http", ignoreCase = true) -> null
+          trimmed.startsWith("/") -> trimmed
+          else -> "/$trimmed"
+        }
+      val candidateUrls =
+        if (normalizedPath != null) {
+          listOf(
+            "https://torrentclaw.to$normalizedPath",
+            "https://torrentclaw.com$normalizedPath",
+          )
+        } else {
+          listOf(trimmed)
+        }
+
+      var lastError: Throwable? = null
+      for (targetUrl in candidateUrls) {
+        val attempt =
+          runCatching {
+            val response = primaryService.fetchHtmlPage(targetUrl)
+            val body = response.body()?.use { it.string() }.orEmpty()
+            if (!response.isSuccessful) {
+              response.errorBody()?.close()
+              throw TorrentClawHttpException(response.code(), "Page returned HTTP ${response.code()}")
+            }
+            if (body.isBlank()) error("Empty HTML page")
+            body
+          }
+        if (attempt.isSuccess) return@withContext attempt
+        lastError = attempt.exceptionOrNull()
+      }
+      Result.failure(lastError ?: IllegalStateException("Unable to load public content page"))
+    }
+
   suspend fun downloadTorrentFile(
     infoHash: String,
     directUrl: String?,

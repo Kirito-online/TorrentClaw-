@@ -1087,6 +1087,68 @@ class ExampleUnitTest {
     assertTrue(com.example.data.model.isSameFavoriteMedia(movie, sameMovieByImdb))
 
     val differentTypeSameTmdb = MediaItem(id = "95396", tmdbId = 95396, title = "Severance", mediaType = MediaType.MOVIE)
-    assertFalse(com.example.data.model.isSameFavoriteMedia(show, differentTypeSameTmdb))
+    assertFalse(isSameFavoriteMedia(show, differentTypeSameTmdb))
   }
+
+  @Test
+  fun `parsePublicContentPageTorrents and deduplicateTorrents upgrade anonymous releases with real magnet URIs`() =
+    runBlocking {
+      val hash1 = "2849211f150e966ef7924f43aec22727a644e10d"
+      val hash2 = "0b5b56bb331b7c1454dead76b58e9603e2a3fac5"
+      val flightInner =
+        """1a:["$","div",null,{"torrents":[{"seeders":320}]},{"torrents":[{"infoHash":"$hash1","rawTitle":"Inception 2010 PROPER Bluray 2160p AV1 HDR10-UH","quality":"2160p","codec":"AV1","sourceType":"bluray","sizeBytes":"9563173563","seeders":320,"leechers":113,"source":"nexarr:Knaben","qualityScore":91,"uploadedAt":"2024-07-20T23:00:00.000Z","hdrType":"HDR10"}]}]"""
+          .replace("\\", "\\\\")
+          .replace("\"", "\\\"")
+      val html =
+        """
+        <html><body>
+          <a href="magnet:?xt=urn:btih:$hash2&amp;dn=Inception%202010%20UHD%20BluRay%202160p&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce">Magnet</a>
+          <script>self.__next_f.push([1,"$flightInner"])</script>
+        </body></html>
+        """.trimIndent()
+
+      val extracted =
+        TorrentClawJsonParser.parsePublicContentPageTorrents(
+          html = html,
+          fallbackMediaTitle = "Inception",
+          parentTitleId = "71543",
+          parentContentUrl = "/movies/inception-2010-71543",
+        )
+      // Stub {"seeders":320} is skipped; both hash1 (from flight) and hash2 (from <a href>) are parsed
+      assertEquals(2, extracted.size)
+      val r1 = extracted.first { it.infoHash == hash1 }
+      assertTrue(r1.hasDirectMagnet)
+      assertTrue(r1.resolvedMagnetUrl.startsWith("magnet:?xt=urn:btih:$hash1"))
+      val r2 = extracted.first { it.infoHash == hash2 }
+      assertTrue(r2.resolvedMagnetUrl.startsWith("magnet:?xt=urn:btih:$hash2"))
+      assertTrue(r2.resolvedMagnetUrl.contains("tracker.opentrackr.org"))
+
+      // Anonymous API release merges cleanly with hashed release into 1 row retaining verified status + real magnet
+      val anonApi =
+        TorrentRelease(
+          infoHash = "",
+          releaseName = "Inception 2010 PROPER Bluray 2160p AV1 HDR10-UH",
+          resolution = "2160p",
+          sizeBytes = 9563173563L,
+          trackerSource = "nexarr:Knaben",
+          trueSpecStatus = TrueSpecStatus.VERIFIED,
+          contentUrl = "/movies/inception-2010-71543",
+        )
+      val merged = deduplicateTorrents(listOf(anonApi, r1))
+      assertEquals(1, merged.size)
+      assertEquals(hash1, merged.first().infoHash)
+      assertEquals(TrueSpecStatus.VERIFIED, merged.first().trueSpecStatus)
+      assertTrue(merged.first().resolvedMagnetUrl.startsWith("magnet:?xt=urn:btih:$hash1"))
+
+      // Repository resolveMagnetForRelease upgrades anonymous release on demand
+      val fakeNet =
+        object : TorrentClawNetworkService() {
+          override suspend fun fetchPublicContentPage(contentPath: String): Result<String> =
+            Result.success(html)
+        }
+      val repo = TorrentClawRepository(android.content.ContextWrapper(null), fakeNet)
+      val resolved = repo.resolveMagnetForRelease(anonApi)
+      assertEquals(hash1, resolved.infoHash)
+      assertTrue(resolved.resolvedMagnetUrl.startsWith("magnet:?xt=urn:btih:$hash1"))
+    }
 }

@@ -545,20 +545,112 @@ fun matchesSeasonAndEpisode(
 }
 
 fun deduplicateTorrents(list: List<TorrentRelease>): List<TorrentRelease> {
-  val map = linkedMapOf<String, TorrentRelease>()
+  val result = mutableListOf<TorrentRelease>()
+  val byHash = hashMapOf<String, Int>()
+  val bySignature = hashMapOf<String, Int>()
+  val byNameAndSize = hashMapOf<String, Int>()
+
   for (item in list) {
-    val key =
-      item.infoHash.lowercase().ifBlank {
-        "${item.releaseName.lowercase()}|${item.sizeBytes}|${item.trackerSource.lowercase()}|${normalizeResolutionTag(item.resolution)}"
+    val hashKey = item.infoHash.trim().lowercase()
+    val sigKey =
+      "${item.releaseName.trim().lowercase()}|${item.sizeBytes}|${item.trackerSource.trim().lowercase()}|${normalizeResolutionTag(item.resolution)}"
+    val nameSizeKey =
+      if (item.sizeBytes > 0L) "${item.releaseName.trim().lowercase()}|${item.sizeBytes}" else ""
+
+    val nameSizeCandidate =
+      if (nameSizeKey.isNotBlank()) {
+        byNameAndSize[nameSizeKey]?.takeIf { idx ->
+          val existing = result[idx]
+          val existingHash = existing.infoHash.trim().lowercase()
+          val crossHashUpgrade = (hashKey.isNotBlank() != existingHash.isNotBlank())
+          val trackerCompatible =
+            item.trackerSource.isBlank() ||
+              existing.trackerSource.isBlank() ||
+              item.trackerSource.equals(existing.trackerSource, ignoreCase = true)
+          crossHashUpgrade && trackerCompatible
+        }
+      } else {
+        null
       }
-    val existing = map[key]
-    if (existing == null || item.qualityScore > existing.qualityScore ||
-      (item.qualityScore == existing.qualityScore && item.seeders > existing.seeders)
-    ) {
-      map[key] = item
+
+    val existingIdx =
+      (if (hashKey.isNotBlank()) byHash[hashKey] else null)
+        ?: bySignature[sigKey]
+        ?: nameSizeCandidate
+
+    if (existingIdx == null) {
+      val idx = result.size
+      result.add(item)
+      if (hashKey.isNotBlank()) byHash[hashKey] = idx
+      bySignature[sigKey] = idx
+      if (nameSizeKey.isNotBlank()) byNameAndSize[nameSizeKey] = idx
+    } else {
+      val existing = result[existingIdx]
+      val existingHash = existing.infoHash.trim().lowercase()
+      val canMergeAcrossHash =
+        hashKey.isBlank() || existingHash.isBlank() || hashKey == existingHash
+      if (canMergeAcrossHash) {
+        val merged = mergeTorrentRelease(existing, item)
+        result[existingIdx] = merged
+        val mergedHash = merged.infoHash.trim().lowercase()
+        if (mergedHash.isNotBlank()) byHash[mergedHash] = existingIdx
+        bySignature[sigKey] = existingIdx
+        if (nameSizeKey.isNotBlank()) byNameAndSize[nameSizeKey] = existingIdx
+      } else {
+        val idx = result.size
+        result.add(item)
+        byHash[hashKey] = idx
+      }
     }
   }
-  return map.values.toList()
+  return result
+}
+
+private fun mergeTorrentRelease(existing: TorrentRelease, incoming: TorrentRelease): TorrentRelease {
+  val primary =
+    when {
+      incoming.hasDirectMagnet && !existing.hasDirectMagnet -> incoming
+      existing.hasDirectMagnet && !incoming.hasDirectMagnet -> existing
+      incoming.qualityScore > existing.qualityScore -> incoming
+      incoming.qualityScore == existing.qualityScore && incoming.seeders > existing.seeders -> incoming
+      else -> existing
+    }
+  val secondary = if (primary === incoming) existing else incoming
+  return primary.copy(
+    infoHash = primary.infoHash.ifBlank { secondary.infoHash },
+    releaseName =
+      if (primary.hasExplicitReleaseName) primary.releaseName
+      else if (secondary.hasExplicitReleaseName) secondary.releaseName
+      else primary.releaseName,
+    hasExplicitReleaseName = primary.hasExplicitReleaseName || secondary.hasExplicitReleaseName,
+    titleId = primary.titleId ?: secondary.titleId,
+    mediaTitle = primary.mediaTitle ?: secondary.mediaTitle,
+    tmdbId = primary.tmdbId ?: secondary.tmdbId,
+    imdbId = primary.imdbId ?: secondary.imdbId,
+    resolution = primary.resolution.ifBlank { secondary.resolution },
+    sourceType = primary.sourceType.ifBlank { secondary.sourceType },
+    videoCodec = primary.videoCodec.ifBlank { secondary.videoCodec },
+    audioCodec = primary.audioCodec.ifBlank { secondary.audioCodec },
+    audioChannels = primary.audioChannels.ifBlank { secondary.audioChannels },
+    hdrFormat = primary.hdrFormat ?: secondary.hdrFormat,
+    sizeBytes = if (primary.sizeBytes > 0L) primary.sizeBytes else secondary.sizeBytes,
+    seeders = maxOf(primary.seeders, secondary.seeders),
+    leechers = maxOf(primary.leechers, secondary.leechers),
+    qualityScore = maxOf(primary.qualityScore, secondary.qualityScore),
+    trueSpecStatus =
+      if (primary.trueSpecStatus != TrueSpecStatus.UNKNOWN) primary.trueSpecStatus else secondary.trueSpecStatus,
+    trackerSource = primary.trackerSource.ifBlank { secondary.trackerSource },
+    seasonNumber = primary.seasonNumber ?: secondary.seasonNumber,
+    episodeNumber = primary.episodeNumber ?: secondary.episodeNumber,
+    releaseDate = primary.releaseDate ?: secondary.releaseDate,
+    language = primary.language ?: secondary.language,
+    releaseGroup = primary.releaseGroup ?: secondary.releaseGroup,
+    fileCount = primary.fileCount ?: secondary.fileCount,
+    editionTags = primary.editionTags.ifEmpty { secondary.editionTags },
+    contentUrl = primary.contentUrl ?: secondary.contentUrl,
+    magnetUrl = primary.magnetUrl?.takeIf { it.isNotBlank() } ?: secondary.magnetUrl,
+    torrentDownloadUrl = primary.torrentDownloadUrl ?: secondary.torrentDownloadUrl,
+  )
 }
 
 fun extractAvailableResolutions(torrents: List<TorrentRelease>): List<Pair<String, Int>> {

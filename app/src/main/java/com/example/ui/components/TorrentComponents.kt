@@ -742,21 +742,38 @@ fun MagnetChooserSheet(
       }
 
       if (release.hasDirectMagnet) {
-        if (release.infoHash.isNotBlank()) {
+        val magnetPreview = release.resolvedMagnetUrl
+        if (release.infoHash.isNotBlank() || magnetPreview.isNotBlank()) {
           Surface(
             shape = RoundedCornerShape(10.dp),
             color = MaterialTheme.colorScheme.surfaceVariant,
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
             modifier = Modifier.fillMaxWidth(),
           ) {
-            Text(
-              text = "Hash: ${release.infoHash}",
-              style = MaterialTheme.typography.labelSmall,
-              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            Column(
               modifier = Modifier.padding(10.dp),
-              maxLines = 1,
-              overflow = TextOverflow.Ellipsis,
-            )
+              verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+              if (release.infoHash.isNotBlank()) {
+                Text(
+                  text = "Hash: ${release.infoHash}",
+                  style = MaterialTheme.typography.labelSmall,
+                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                )
+              }
+              if (magnetPreview.isNotBlank()) {
+                Text(
+                  text = magnetPreview,
+                  style = MaterialTheme.typography.labelSmall,
+                  color = MaterialTheme.colorScheme.primary,
+                  maxLines = 2,
+                  overflow = TextOverflow.Ellipsis,
+                  modifier = Modifier.testTag("magnet_uri_preview"),
+                )
+              }
+            }
           }
         }
 

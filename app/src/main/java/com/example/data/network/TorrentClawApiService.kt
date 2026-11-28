@@ -88,4 +88,12 @@ interface TorrentClawApiService {
   @Streaming
   @GET
   suspend fun downloadFile(@Url url: String): Response<ResponseBody>
+
+  @GET
+  suspend fun fetchHtmlPage(
+    @Url url: String,
+    @retrofit2.http.Header("Accept") accept: String = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    @retrofit2.http.Header("User-Agent") userAgent: String =
+      "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36",
+  ): Response<ResponseBody>
 }

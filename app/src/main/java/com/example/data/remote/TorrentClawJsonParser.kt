@@ -156,6 +156,247 @@ object TorrentClawJsonParser {
     )
   }
 
+  /**
+   * Parses public HTML pages from TorrentClaw (e.g. https://torrentclaw.to/movies/...)
+   * extracting both <a href="magnet:..."> links and Next.js flight "torrents":[...] payloads
+   * using linear O(N) string scanners (no backtracking regexes on multi-MB HTML).
+   */
+  fun parsePublicContentPageTorrents(
+    html: String,
+    fallbackMediaTitle: String? = null,
+    parentTitleId: String? = null,
+    parentTmdbId: Int? = null,
+    parentImdbId: String? = null,
+    parentContentUrl: String? = null,
+  ): List<TorrentRelease> {
+    if (html.isBlank()) return emptyList()
+
+    val magnetsByHash = extractHtmlMagnetLinksByHash(html)
+    val parsed = mutableListOf<TorrentRelease>()
+
+    val flightChunks = extractNextFlightChunks(html)
+    for (chunk in flightChunks) {
+      var searchFrom = 0
+      while (true) {
+        val markerIdx = chunk.indexOf("\"torrents\":[", searchFrom)
+        if (markerIdx == -1) break
+        val arrStart = chunk.indexOf('[', markerIdx)
+        if (arrStart == -1) break
+        val arrEnd = findBalancedBracketEnd(chunk, arrStart)
+        if (arrEnd <= arrStart) {
+          searchFrom = arrStart + 1
+          continue
+        }
+        val arrayText = chunk.substring(arrStart, arrEnd)
+        val arr = runCatching { json.parseToJsonElement(arrayText) as? JsonArray }.getOrNull()
+        arr?.forEach { el ->
+          val tObj = el as? JsonObject ?: return@forEach
+          val hasHashOrMagnet =
+            tObj.str("infoHash", "info_hash", "infohash", "hash", "btih") != null ||
+              tObj.str("magnet", "magnetUrl", "magnet_url", "magnetUri", "magnet_uri", "magnetLink", "magnet_link") != null
+          val hasTitle =
+            tObj.str("rawTitle", "raw_title", "releaseName", "release_name", "title", "name") != null
+          if (!hasHashOrMagnet && !hasTitle) return@forEach
+
+          val release =
+            parseTorrentObject(
+              obj = tObj,
+              fallbackMediaTitle = fallbackMediaTitle,
+              parentTitleId = parentTitleId,
+              parentTmdbId = parentTmdbId,
+              parentImdbId = parentImdbId,
+              parentContentUrl = parentContentUrl,
+            ) ?: return@forEach
+
+          val matchedMagnet =
+            if (release.magnetUrl.isNullOrBlank() && release.infoHash.isNotBlank()) {
+              magnetsByHash[release.infoHash.lowercase()]
+            } else {
+              release.magnetUrl
+            }
+          parsed.add(if (matchedMagnet != null) release.copy(magnetUrl = matchedMagnet) else release)
+        }
+        searchFrom = arrEnd
+      }
+    }
+
+    val seenHashes = parsed.mapNotNull { it.infoHash.trim().lowercase().takeIf { h -> h.isNotBlank() } }.toMutableSet()
+    for ((hashLower, magnetUri) in magnetsByHash) {
+      if (hashLower !in seenHashes) {
+        seenHashes.add(hashLower)
+        val displayName =
+          com.example.data.model.extractMagnetDisplayName(magnetUri)
+            ?: fallbackMediaTitle
+            ?: hashLower
+        val (seasonNum, epNum) = extractSeasonEpisodeFromName(displayName)
+        parsed.add(
+          TorrentRelease(
+            infoHash = hashLower,
+            releaseName = displayName,
+            hasExplicitReleaseName = displayName != hashLower,
+            titleId = parentTitleId,
+            mediaTitle = fallbackMediaTitle,
+            tmdbId = parentTmdbId,
+            imdbId = parentImdbId,
+            seasonNumber = seasonNum,
+            episodeNumber = epNum,
+            contentUrl = parentContentUrl,
+            magnetUrl = magnetUri,
+          )
+        )
+      }
+    }
+
+    return deduplicateTorrents(parsed)
+  }
+
+  private fun extractHtmlMagnetLinksByHash(html: String): Map<String, String> {
+    val result = linkedMapOf<String, String>()
+    var idx = 0
+    while (true) {
+      val pos = html.indexOf("magnet:?xt=urn:btih:", idx, ignoreCase = true)
+      if (pos == -1) break
+      var end = pos
+      while (end < html.length) {
+        val ch = html[end]
+        if (ch == '"' || ch == '\'' || ch == '<' || ch == '>' || ch.isWhitespace() || ch == '\\') break
+        end++
+      }
+      val raw = html.substring(pos, end)
+      val unescaped =
+        raw
+          .replace("&amp;", "&")
+          .replace("&#x26;", "&", ignoreCase = true)
+          .replace("&#38;", "&")
+      val hash =
+        Regex("btih:([a-zA-Z0-9]{32,40})", RegexOption.IGNORE_CASE)
+          .find(unescaped)
+          ?.groupValues
+          ?.get(1)
+          ?.lowercase()
+      if (!hash.isNullOrBlank() && !result.containsKey(hash)) {
+        result[hash] = unescaped
+      }
+      idx = maxOf(end, pos + 20)
+    }
+    return result
+  }
+
+  private fun extractNextFlightChunks(html: String): List<String> {
+    val chunks = mutableListOf<String>()
+    val prefix = "self.__next_f.push([1,\""
+    var cursor = 0
+    while (true) {
+      val start = html.indexOf(prefix, cursor)
+      if (start == -1) break
+      val strStart = start + prefix.length - 1 // include opening quote
+      var i = strStart + 1
+      var escaped = false
+      while (i < html.length) {
+        val ch = html[i]
+        if (escaped) {
+          escaped = false
+        } else if (ch == '\\') {
+          escaped = true
+        } else if (ch == '"') {
+          break
+        }
+        i++
+      }
+      if (i < html.length && html[i] == '"') {
+        val decoded = unescapeJsString(html, strStart + 1, i)
+        if (decoded.isNotBlank() && decoded.contains("torrents")) {
+          chunks.add(decoded)
+        }
+        cursor = i + 1
+      } else {
+        break
+      }
+    }
+    return chunks
+  }
+
+  private fun unescapeJsString(src: String, startInclusive: Int, endExclusive: Int): String {
+    val sb = StringBuilder(endExclusive - startInclusive)
+    var i = startInclusive
+    while (i < endExclusive) {
+      val ch = src[i]
+      if (ch == '\\' && i + 1 < endExclusive) {
+        val next = src[i + 1]
+        when (next) {
+          '"' -> { sb.append('"'); i += 2 }
+          '\'' -> { sb.append('\''); i += 2 }
+          '\\' -> { sb.append('\\'); i += 2 }
+          '/' -> { sb.append('/'); i += 2 }
+          'b' -> { sb.append('\b'); i += 2 }
+          'f' -> { sb.append('\u000C'); i += 2 }
+          'n' -> { sb.append('\n'); i += 2 }
+          'r' -> { sb.append('\r'); i += 2 }
+          't' -> { sb.append('\t'); i += 2 }
+          'u' -> {
+            if (i + 5 < endExclusive) {
+              val code = src.substring(i + 2, i + 6).toIntOrNull(16)
+              if (code != null) {
+                sb.append(code.toChar())
+                i += 6
+                continue
+              }
+            }
+            sb.append('u')
+            i += 2
+          }
+          'x' -> {
+            if (i + 3 < endExclusive) {
+              val code = src.substring(i + 2, i + 4).toIntOrNull(16)
+              if (code != null) {
+                sb.append(code.toChar())
+                i += 4
+                continue
+              }
+            }
+            sb.append('x')
+            i += 2
+          }
+          else -> { sb.append(next); i += 2 }
+        }
+      } else {
+        sb.append(ch)
+        i++
+      }
+    }
+    return sb.toString()
+  }
+
+  private fun findBalancedBracketEnd(text: String, openBracketIndex: Int): Int {
+    if (openBracketIndex !in text.indices || text[openBracketIndex] != '[') return -1
+    var depth = 0
+    var inStr = false
+    var escaped = false
+    for (i in openBracketIndex until text.length) {
+      val ch = text[i]
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (ch == '\\' && inStr) {
+        escaped = true
+        continue
+      }
+      if (ch == '"') {
+        inStr = !inStr
+        continue
+      }
+      if (!inStr) {
+        if (ch == '[') depth++
+        else if (ch == ']') {
+          depth--
+          if (depth == 0) return i + 1
+        }
+      }
+    }
+    return -1
+  }
+
   fun parseAutocompleteResponse(rawJson: String): List<MediaItem> {
     val root = runCatching { json.parseToJsonElement(rawJson) }.getOrNull() ?: return emptyList()
     val arr =

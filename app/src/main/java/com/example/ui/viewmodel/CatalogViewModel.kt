@@ -473,6 +473,15 @@ class CatalogViewModel(
   fun openTorrentChooser(release: TorrentRelease) {
     _installedClients.value = TorrentIntentHelper.findInstalledTorrentClients(appContext)
     _selectedTorrentForChooser.value = release
+    if (!release.hasDirectMagnet) {
+      val fallbackUrl = _selectedMediaForDetail.value?.resolvedContentWebUrl
+      viewModelScope.launch {
+        val enriched = repository.resolveMagnetForRelease(release, fallbackUrl)
+        if (enriched.hasDirectMagnet && _selectedTorrentForChooser.value == release) {
+          _selectedTorrentForChooser.value = enriched
+        }
+      }
+    }
   }
 
   fun dismissTorrentChooser() {
@@ -482,14 +491,17 @@ class CatalogViewModel(
   fun openMagnetDirectly(release: TorrentRelease, fallbackMediaUrl: String? = null) {
     viewModelScope.launch {
       val preferredPkg = prefsState.value.preferredTorrentClientPackage
-      val magnetUri = release.resolvedMagnetUrl
+      val resolvedRelease =
+        if (release.resolvedMagnetUrl.isNotBlank()) release
+        else repository.resolveMagnetForRelease(release, fallbackMediaUrl)
+      val magnetUri = resolvedRelease.resolvedMagnetUrl
       if (magnetUri.isNotBlank()) {
         val launched = TorrentIntentHelper.openMagnetLink(appContext, magnetUri, preferredPkg)
         if (launched) {
           _selectedTorrentForChooser.value = null
           return@launch
         }
-        openTorrentChooser(release)
+        openTorrentChooser(resolvedRelease)
         val installed = _installedClients.value
         _events.emit(
           CatalogUiEvent.Message(
@@ -500,23 +512,23 @@ class CatalogViewModel(
         return@launch
       }
 
-      if (!release.torrentDownloadUrl.isNullOrBlank()) {
-        downloadTorrentFile(release, preferredPkg)
+      if (!resolvedRelease.torrentDownloadUrl.isNullOrBlank()) {
+        downloadTorrentFile(resolvedRelease, preferredPkg)
         return@launch
       }
 
       val searchQuery =
         URLEncoder.encode(
-          release.mediaTitle?.takeIf { it.isNotBlank() } ?: release.releaseName,
+          resolvedRelease.mediaTitle?.takeIf { it.isNotBlank() } ?: resolvedRelease.releaseName,
           StandardCharsets.UTF_8.name(),
         )
       val url =
-        release.resolvedContentWebUrl
+        resolvedRelease.resolvedContentWebUrl
           ?: fallbackMediaUrl?.takeIf { it.isNotBlank() }
           ?: "https://torrentclaw.com/search?q=$searchQuery"
       val openedWeb = TorrentIntentHelper.openWebUrl(appContext, url)
       if (!openedWeb) {
-        openTorrentChooser(release)
+        openTorrentChooser(resolvedRelease)
         _events.emit(
           CatalogUiEvent.Message("Add a free TorrentClaw API key or copy title to get magnet links.")
         )
