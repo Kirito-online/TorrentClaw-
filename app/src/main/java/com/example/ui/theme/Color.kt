@@ -110,6 +110,7 @@ data class TorrentClawSemanticColors(
   val seederHigh: Color,
   val seederMid: Color,
   val seederLow: Color,
+  val favoriteRose: Color,
   val cardSubtleBorder: Color,
 )
 
@@ -124,6 +125,7 @@ val DarkSemanticColors =
     seederHigh = Color(0xFF34D399),
     seederMid = Color(0xFFFBBF24),
     seederLow = Color(0xFFF87171),
+    favoriteRose = Color(0xFFFF4D6D),
     cardSubtleBorder = Color(0xFF24324A),
   )
 
@@ -138,6 +140,7 @@ val LightSemanticColors =
     seederHigh = Color(0xFF059669),
     seederMid = Color(0xFFD97706),
     seederLow = Color(0xFFDC2626),
+    favoriteRose = Color(0xFFE11D48),
     cardSubtleBorder = Color(0xFFDDE5F0),
   )
 

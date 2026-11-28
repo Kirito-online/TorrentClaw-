@@ -1,15 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">TorrentClaw</string>
-    <string name="url_bar_back">Back</string>
-    <string name="url_bar_refresh">Refresh page</string>
-    <string name="url_bar_share">Share page URL</string>
-    <string name="url_bar_verified_host">Verified torrentclaw.com connection</string>
     <string name="search_placeholder">Search movies, shows, IMDb/TMDB URLs…</string>
     <string name="magnet_sheet_open">Open in Torrent App</string>
-    <string name="magnet_sheet_copy">Copy Link</string>
+    <string name="magnet_sheet_copy">Copy Magnet Link</string>
+    <string name="magnet_sheet_copy_hash">Copy Info Hash</string>
     <string name="magnet_sheet_download_torrent">Download &amp; Open .torrent</string>
     <string name="magnet_sheet_share">Share</string>
     <string name="widget_title">TorrentClaw</string>
-    <string name="widget_empty">Tap to browse torrentclaw.com natively</string>
+    <string name="widget_empty">Tap to discover trending torrents on TorrentClaw</string>
+    <string name="favorite_add">Add to favorites</string>
+    <string name="favorite_remove">Remove from favorites</string>
+    <string name="favorites_empty_title">No favorites yet</string>
+    <string name="favorites_empty_subtitle">Tap the heart on any movie or TV show to save it here for quick access.</string>
 </resources>

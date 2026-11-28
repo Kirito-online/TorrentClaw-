@@ -4,24 +4,36 @@ import android.app.Application
 import android.content.Context
 import coil.ImageLoader
 import coil.ImageLoaderFactory
-import coil.disk.DiskCache
-import coil.memory.MemoryCache
 import com.example.core.preferences.AppPreferences
-import com.example.core.security.KeystoreCredentialVault
-import com.example.core.security.PersistentCookieJar
-import com.example.data.web.OffscreenDomExtractor
-import com.example.data.web.WebsiteHttpClient
-import com.example.data.web.WebsitePageRepository
+import com.example.data.network.TorrentClawNetworkModule
+import com.example.data.network.TorrentClawNetworkService
+import com.example.data.repository.TorrentClawRepository
 import com.example.util.NotificationHelper
+
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class AppContainer(context: Context) {
   val appContext: Context = context.applicationContext
-  val vault = KeystoreCredentialVault(appContext)
   val preferences = AppPreferences(appContext)
-  val cookieJar = PersistentCookieJar(vault)
-  val httpClient = WebsiteHttpClient(cookieJar)
-  val domExtractor = OffscreenDomExtractor(appContext, cookieJar)
-  val websitePageRepository = WebsitePageRepository(httpClient, domExtractor)
+  @Volatile var torrentClawApiKey: String? = null
+
+  private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+  init {
+    scope.launch {
+      preferences.preferencesFlow.collect { state ->
+        torrentClawApiKey = state.torrentClawApiKey
+      }
+    }
+  }
+
+  val apiOkHttpClient = TorrentClawNetworkModule.createApiOkHttpClient { torrentClawApiKey }
+  val imageOkHttpClient = TorrentClawNetworkModule.createImageOkHttpClient(apiOkHttpClient)
+  val networkService = TorrentClawNetworkService(apiOkHttpClient)
+  val repository = TorrentClawRepository(appContext, networkService)
 }
 
 class TorrentClawApp : Application(), ImageLoaderFactory {
@@ -36,15 +48,9 @@ class TorrentClawApp : Application(), ImageLoaderFactory {
   }
 
   override fun newImageLoader(): ImageLoader {
-    return ImageLoader.Builder(this)
-      .memoryCache { MemoryCache.Builder(this).maxSizePercent(0.22).build() }
-      .diskCache {
-        DiskCache.Builder()
-          .directory(cacheDir.resolve("coil_poster_cache"))
-          .maxSizeBytes(120L * 1024L * 1024L)
-          .build()
-      }
-      .crossfade(true)
-      .build()
+    return TorrentClawNetworkModule.createImageLoader(
+      context = this,
+      imageOkHttpClient = container.imageOkHttpClient,
+    )
   }
 }
